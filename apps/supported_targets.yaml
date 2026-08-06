@@ -1,0 +1,17 @@
+os:
+  android:
+    ostype: Android
+    version: 11+
+  windows:
+    ostype: Windows
+    version: '11'
+  ubuntu:
+    ostype: Ubuntu
+    version: '24.04'
+
+language:
+- C++
+- Python
+- Java
+- Kotlin
+- Go

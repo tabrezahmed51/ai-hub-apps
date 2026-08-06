@@ -24,10 +24,10 @@
     & .\RunLlm.ps1 -ModelName llama_v3_2_3b_instruct -BundleRoot genie_bundle -RawPrompt "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nHow many dogs are there in space?<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
 
 .LINK
-    https://github.com/quic/ai-hub-apps/tree/main/tutorials/llm_on_genie/
+    https://github.com/qualcomm/ai-hub-apps/tree/main/tutorials/llm_on_genie/
 
 .LINK
-    https://github.com/quic/ai-hub-models/
+    https://github.com/qualcomm/ai-hub-models/
 #>
 param (
     [Parameter(Mandatory = $true,

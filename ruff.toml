@@ -1,0 +1,90 @@
+target-version = "py310"
+
+[lint]
+select = [
+    "E",      # pycodestyle
+    "F",      # pyflakes (flake8 replacement) rules
+    "I",      # sort imports
+    "UP",     # pyupgrade replacement rules
+    "PGH",    # disallow naked type: ignore with no reason
+    "T10",    # looks for breakpoints
+    "ISC",    # fixes incorrect string concat
+    "INP",    # missing __init__.py
+    "D",      # docstring format
+    "NPY",    # numpy rules
+    "PD",     # pandas rules
+    "PERF",   # minor syntax changes that improve performance
+    "PL",     # pylint rules
+    "YTT",    # linting rules around python version comparisons
+    "A",      # disallows variables that mirror builtins
+    "B",      # catches common bugs
+    "PT",     # modern pytest syntax / catches bad tests
+    "TRY",    # prevents antipatterns when exceptions are thrown
+    "C4",     # prevents container antipatterns
+    "RET",    # optimal return syntax
+    "SIM",    # enforces simpler syntax
+    "RUF",    # various helpful rules not found in other linter sets
+    "FURB",   # prevents outdated python syntax
+    "PIE",    # prevents outdated python syntax
+    "PYI",    # makes sure advanced typings are implemented correctly
+    "TID251", # banned imports
+    "ANN",    # enforces that all functions have type annotations
+]
+ignore = [
+    "E501",    # line too long
+    "E741",    # ambiguous variable names
+    ###
+    # Rules that require every function / class / module to have a docstring
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "D104",
+    "D105",
+    "D106",
+    "D107",
+    ###
+    # Rules that are overly picky about docstring verbage / formatting.
+    "D205",
+    "D400",
+    "D401",
+    "D404",
+    "D415",
+    ###
+    "PLR2004", # magic value for constant
+    "PLC0415", # import should be at top of file. We can't do this a lot of the time.
+    "PLR0915", # function too long
+    "PLR0913", # too many arguments
+    "PLR0914", # too many locals
+    "PLR0912", # too many branches
+    "PLR0911", # too many returns
+    "PLR0904", # too many public methods
+    "PLR0916", # too many boolean expressions
+    "PLR0917", # too many positional args
+    "PLR1702", # too many nested blocks
+    "PLW2901", # for loop variable overwritten inside loop
+    "B019",    # functools.cache can lead to memory leaks
+    "PT018",   # test assertions should be broken into multiple parts (buggy check outside pytest code)
+    "PT015",   # assertion always fails, replace with pytest.fail() (buggy check outside pytest code)
+    "TRY003",  # avoid specifying long messages outside the exception class
+    "TRY300",  # consider moving return statement to an else block
+    "RUF009",  # don't use function in dataclass defaults
+    "RUF012",  # mutable class attributes should be annotated with typing.ClassVar
+    "ANN401",  # do not use 'Any' for typing
+]
+
+[lint.per-file-ignores]
+# apps/ are standalone scripts, not packages — no __init__.py at app root
+"apps/*" = ["INP"]
+
+[lint.flake8-comprehensions]
+allow-dict-calls-with-keyword-arguments = true
+
+[lint.flake8-bugbear]
+extend-immutable-calls = ["os.path.join"]
+
+[lint.pyupgrade]
+keep-runtime-typing = true
+
+[lint.pydocstyle]
+convention = "numpy"

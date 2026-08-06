@@ -1,0 +1,69 @@
+name: Release - Code & Repository
+run-name: Release - Code & Repository (${{ github.ref_name }})
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+      inputs:
+          force:
+            required: false
+            type: boolean
+            default: false
+            description: Force replace an existing tag
+  workflow_call:
+      inputs:
+          skip_approval:
+            required: false
+            type: boolean
+            default: false
+
+jobs:
+  approve:
+    if: ${{ !inputs.skip_approval }}
+
+    name: Approve Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    steps:
+      - run: echo "Release approved"
+
+  release_code_repo:
+      name: Release Code
+      needs: [approve]
+      if: ${{ !cancelled() && (needs.approve.result == 'success' || needs.approve.result == 'skipped') }}
+      runs-on: [tetra-ubuntu-2204, self-hosted]
+
+      steps:
+      - name: Verify running on a release tag
+        run: |
+          if [[ "${{ github.ref }}" != refs/tags/* ]]; then
+            echo "Error: This workflow must be run from a tag, got ${{ github.ref }}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          # Prevent checkout from configuring its own credential helper,
+          # which would override PROD_GH_TOKEN with GITHUB_TOKEN.
+          persist-credentials: false
+
+      - name: Push tag to public repository
+        env:
+          QAIHM_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.PROD_GH_TOKEN }}
+        run: |
+          git config --local credential.helper '!f() { echo "username=x-access-token"; echo "password=$GH_TOKEN"; }; f'
+          git remote add public https://github.com/qualcomm/ai-hub-apps.git
+
+          FORCE_FLAG=""
+          if [ "${{ inputs.force }}" == "true" ]; then
+            FORCE_FLAG="-f"
+          else
+            if git ls-remote --tags public | grep -q "refs/tags/$QAIHM_TAG$"; then
+              echo "Tag $QAIHM_TAG already exists in the public repository. Aborting release. Use force to replace."
+              exit 1
+            fi
+          fi
+
+          git push $FORCE_FLAG public "$QAIHM_TAG"

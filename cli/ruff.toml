@@ -1,0 +1,9 @@
+extend = "../ruff.toml"
+
+[lint.isort]
+known-first-party = ["qai_hub_apps"]
+
+[lint.per-file-ignores]
+# test files and conftest: skip type annotation requirements and namespace-package check
+"*_test.py" = ["ANN", "INP"]
+"conftest.py" = ["ANN", "INP"]

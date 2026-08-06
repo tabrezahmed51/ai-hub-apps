@@ -1,0 +1,218 @@
+name: Release - Public Website
+run-name: ${{ inputs.create_pr && 'Release - Public Website Import and Create PR' || 'Test Public Website Import' }}
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      source_branch_name:
+        description: (Optional) AI Hub Apps branch to fetch apps from
+        required: false
+        type: string
+
+      create_pr:
+        description: Put up a PR with updated apps
+        default: false
+        type: boolean
+
+      dst_branch_name:
+        description: (Optional) Branch to push to tetra-public-website
+        required: false
+        type: string
+
+      import_models:
+        description: (Optional) Clone and import AI Hub Models
+        type: boolean
+        default: false
+
+      models_branch_name:
+        description: (Optional) AI Hub Models branch to fetch models from
+        required: false
+        type: string
+
+      import_mode:
+        description: Import mode.
+        type: choice
+        default: default
+        options:
+          - default
+          - no-verify
+          - no-verify-urls
+
+  # Used by other workflows to trigger this workflow
+  workflow_call:
+    inputs:
+      source_branch_name:
+        required: false
+        type: string
+
+      dst_branch_name:
+        required: false
+        type: string
+
+      create_pr:
+        default: false
+        type: boolean
+
+      import_models:
+        default: false
+        type: boolean
+
+      models_branch_name:
+        required: false
+        type: string
+
+      import_mode:
+        type: string
+        default: default
+
+    outputs:
+      website_pr_url:
+        description: "Public Website PR URL"
+        value: ${{ jobs.sync_public_website.outputs.website_pr_url }}
+
+jobs:
+    sync_public_website:
+        name: ${{ inputs.create_pr && 'Release - Public Website Import and Create PR' || 'Test Public Website Import' }}
+        runs-on: [tetra-ubuntu-2204, self-hosted]
+        outputs:
+          website_pr_url: ${{ steps.create-public-website-pr.outputs.result }}
+
+        permissions:
+          contents: write
+          actions: read
+          pull-requests: write
+
+        env:
+          SRC_BRANCH_NAME: ${{ inputs.source_branch_name || 'curr_ref' }}
+          MODELS_BRANCH_NAME: ${{ inputs.models_branch_name || 'main' }}
+          DST_BRANCH_NAME: ${{ inputs.dst_branch_name || format('dev/qaihm_bot-QCOM/{0}', github.run_id ) }}
+          NODE_VERSION: 22.x
+          PYTHON_VERSION: '3.10'
+          VENV_PATH: build/ci-envs/release
+          IMPORT_MODE: ${{ inputs.import_mode }}
+
+        steps:
+          - uses: actions/checkout@v7
+            id: checkout_apps_custom_ref
+            if: ${{ env.SRC_BRANCH_NAME != 'curr_ref' }}
+            name: Clone AI Hub Apps Internal (${{ env.SRC_BRANCH_NAME }})
+            with:
+              path: ai-hub-apps-internal
+              ref: ${{ env.SRC_BRANCH_NAME }}
+
+          - uses: actions/checkout@v7
+            if: ${{ steps.checkout_apps_custom_ref.conclusion == 'skipped' }}
+            name: Clone AI Hub Apps Internal
+            with:
+              path: ai-hub-apps-internal
+
+          - uses: actions/checkout@v7
+            id: checkout_models
+            if: ${{ inputs.import_models }}
+            name: Clone AI Hub Models Internal (${{ env.MODELS_BRANCH_NAME }})
+            with:
+              path: ai-hub-models-internal
+              repository: qcom-ai-hub/ai-hub-models-internal
+              token: ${{ secrets.STAGING_GH_TOKEN }}
+              ref: ${{ env.MODELS_BRANCH_NAME }}
+
+          - uses: actions/checkout@v7
+            name: Clone Tetra Public Website
+            with:
+              path: tetra-public-website
+              repository: qcom-ai-hub/tetra-public-website
+              token: ${{ secrets.STAGING_GH_TOKEN }}
+
+          - uses: actions/setup-node@v7
+            name: Setup Node
+            with:
+              node-version: ${{ env.NODE_VERSION }}
+
+          - name: Resolve ZOO_APP_REF
+            run: |
+              ref="${{ inputs.source_branch_name }}"
+              if [[ -z "$ref" ]]; then
+                echo "ZOO_APP_REF=" >> "$GITHUB_ENV"
+              elif [[ "$ref" == refs/tags/* ]]; then
+                # Release tags are pushed to the public repo "apps/" prefixed, e.g. v0.30.0 -> apps/v0.30.0.
+                version="${ref#refs/tags/}"
+                echo "ZOO_APP_REF=refs/tags/apps/$version" >> "$GITHUB_ENV"
+              elif [[ "$ref" == refs/* ]]; then
+                echo "ZOO_APP_REF=$ref" >> "$GITHUB_ENV"
+              else
+                echo "ZOO_APP_REF=refs/heads/$ref" >> "$GITHUB_ENV"
+              fi
+
+          - name: Website Import
+            working-directory: tetra-public-website
+            # we have to run both models and apps import as app import depends on model card ids. No need to verify jobs, ai-hub-models will take care of it.
+            run: |
+              cp .env.local.example .env.local
+              sed -i -e "s/DJANGO_API_TOKEN=/DJANGO_API_TOKEN=${{ secrets.HUB_USER_TOKEN_PROD }}/g" .env.local
+              bash scripts/setup.sh
+              if [[ "${{ env.IMPORT_MODE }}" != "default" ]]; then
+                bash scripts/import-zoo.sh app --${{ env.IMPORT_MODE }}
+              else
+                bash scripts/import-zoo.sh app
+              fi
+
+          - name: Commit Changes
+            id: commit_changes
+            working-directory: tetra-public-website
+            run: |
+              git checkout -b ${{ env.DST_BRANCH_NAME }}
+              #
+              # This commit should target main, so reset our ref to main and reset to main's history.
+              # We don't check out main because we want to keep any other changes in this branch.
+              # This makes sure this action is executing code from the branch it was kicked off with.
+              #
+              git fetch origin main
+              git reset origin/main
+              #
+              git add -A src/database/app-zoo/server/data
+              if git diff --cached --quiet; then
+                echo "No changes to commit"
+                echo "committed=false" >> $GITHUB_OUTPUT
+              else
+                git -c user.name='qaihm-bot_QCOM' -c user.email=qaihm_bot@qti.qualcomm.com commit -a -n -m "[Automated] Update App Data for ${{ format('QAIHA Branch {0} and QAIHM Branch {1}', env.SRC_BRANCH_NAME, env.MODELS_BRANCH_NAME) }}"
+                echo "committed=true" >> $GITHUB_OUTPUT
+              fi
+
+          - name: Run Pre-commit Hooks
+            id: run_precommit_hooks
+            # No need to run the precommit if there are no changes against the website's main branch. In that case, there is nothing to check.
+            if: steps.commit_changes.outputs.committed == 'true'
+            working-directory: tetra-public-website
+            run: pnpm run precommit
+
+          - name: Push changes
+            # We push even if the pre-commit fails. This allows the user to check out the branch and fix any issues.
+            if: steps.commit_changes.outputs.committed == 'true' && !cancelled() && (inputs.create_pr || steps.run_precommit_hooks.conclusion == 'failure')
+            working-directory: tetra-public-website
+            run: git push --set-upstream origin ${{ env.DST_BRANCH_NAME }} -f
+
+          - name: Create Public Website PR
+            if: inputs.create_pr && steps.commit_changes.outputs.committed == 'true'
+            id: create-public-website-pr
+            uses: actions/github-script@v9.0.0
+            with:
+              github-token: ${{ secrets.STAGING_GH_TOKEN }}
+              result-encoding: string
+              script: |
+                const result = await github.rest.pulls.create({
+                  title: '[Automated] Update App Data for ${{ format('QAIHA Branch {0} and QAIHM Branch {1}', env.SRC_BRANCH_NAME, env.MODELS_BRANCH_NAME) }}',
+                  owner: 'qcom-ai-hub',
+                  repo: 'tetra-public-website',
+                  head: '${{ env.DST_BRANCH_NAME }}',
+                  base: 'main',
+                  body: 'Update App data for ${{ format('QAIHA Branch {0} and QAIHM Branch {1}', env.SRC_BRANCH_NAME, env.MODELS_BRANCH_NAME) }}.'
+                });
+                const reviewerResult = await github.request(`POST /repos/qcom-ai-hub/tetra-public-website/pulls/${result.data.number}/requested_reviewers`, {
+                  owner: 'qcom-ai-hub',
+                  repo: 'tetra-public-website',
+                  pull_number: result.data.number,
+                  reviewers: ['rockwood_QCOM'],
+                  team_reviewers: ['ai-hub-models-reviewers'],
+                })
+                return result.data.html_url

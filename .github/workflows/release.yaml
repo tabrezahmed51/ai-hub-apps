@@ -1,0 +1,66 @@
+name: Release QAI Hub Apps
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      target:
+        required: true
+        type: choice
+        default: staging
+        description: Release Target
+        options:
+        - staging
+        - prod
+
+jobs:
+  approve:
+    name: Approve Release
+    if: ${{ inputs.target == 'prod' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    steps:
+      - run: echo "Release approved"
+
+  release_code:
+    name: Release code to Repository
+    secrets: inherit
+    needs: [approve]
+    if: ${{ inputs.target == 'prod' }}
+    uses: ./.github/workflows/release_code.yaml
+    with:
+      skip_approval: true
+
+  release_wheel:
+    name: Release Apps and Push to ${{ inputs.target == 'prod' && 'PyPI' || 'test PyPI' }}
+    secrets: inherit
+    needs: [approve, release_code]
+    if: ${{ !cancelled() && (needs.approve.result == 'success' || needs.approve.result == 'skipped') && (needs.release_code.result == 'success' || needs.release_code.result == 'skipped') }}
+    uses: ./.github/workflows/release_wheel.yaml
+    with:
+      target: ${{ inputs.target }}
+      skip_approval: true
+
+  release_apps_branch:
+    name: Fetch Apps & Push to release branch (${{ inputs.target }})
+    secrets: inherit
+    needs: [approve, release_wheel]
+    if: ${{ !cancelled() && (needs.approve.result == 'success' || needs.approve.result == 'skipped') && needs.release_wheel.result == 'success' }}
+    uses: ./.github/workflows/release_apps_branch.yaml
+    with:
+      target: ${{ inputs.target }}
+      skip_approval: true
+
+  sync_public_website:
+    name: Sync Public Website & Create Public Website PR
+    secrets: inherit
+    needs: [approve]
+    if: ${{ inputs.target == 'prod' }}
+    uses: ./.github/workflows/release_website.yaml
+    with:
+      source_branch_name: ${{ github.ref }}
+      dst_branch_name: ${{ format('dev/qaihm_bot-QCOM/qaiha_release/{0}', github.ref_name) }}
+      create_pr: true
+      import_models: false
+      import_mode: no-verify

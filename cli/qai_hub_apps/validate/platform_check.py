@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------
+# Copyright (c) 2025 Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+# ---------------------------------------------------------------------
+from __future__ import annotations
+
+import sys
+from typing import TYPE_CHECKING
+
+from qai_hub_apps.configs.app_yaml import AppType
+
+if TYPE_CHECKING:
+    from qai_hub_apps.registry import App
+
+
+def check_platform(app: App) -> bool:
+    """Return True if the app is supported on the current host platform."""
+    app_type = app.app_type
+    if app_type == AppType.ANDROID:
+        return False
+
+    platform_map = {AppType.WINDOWS: "win32", AppType.UBUNTU: "linux"}
+    required_platform = platform_map.get(app_type)
+    if required_platform is None:
+        return True
+
+    return sys.platform == required_platform

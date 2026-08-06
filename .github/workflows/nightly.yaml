@@ -1,0 +1,186 @@
+##
+## QAI Hub Apps Nightly Tests
+##
+
+name: QAI Hub Apps Nightly
+
+on:
+    # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      notify_slack:
+        description: Send Slack notifications for this run
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 9 * * *' # 1am PDT
+
+env:
+  WHEEL_INDEX_HOST: qaihub-public-python-wheels.s3-website-us-west-2.amazonaws.com
+  WHEEL_INDEX_URL: http://qaihub-public-python-wheels.s3-website-us-west-2.amazonaws.com/
+
+jobs:
+  precommit_check:
+    secrets: inherit
+    uses: ./.github/workflows/build-and-test.yaml
+    with:
+      do_all: true
+      scheduled: true
+
+  publish_nightly:
+    name: "Publish Nightly Dev Build"
+    needs: [precommit_check]
+    if: ${{ success() && github.ref == 'refs/heads/main' }}
+    secrets: inherit
+    uses: ./.github/workflows/publish_nightly.yaml
+
+  test_on_device_apps:
+    secrets: inherit
+    name: "Test AIHA Apps On-Device"
+    needs: [precommit_check, publish_nightly]
+    if: ${{ !cancelled() && needs.precommit_check.result == 'success' }}
+    uses: ./.github/workflows/test_aiha_apps.yaml
+    with:
+      model_selection: first
+      test_stage: all
+      version: ${{ needs.publish_nightly.result == 'success' && needs.publish_nightly.outputs.version || '' }}
+      install_source: ${{ needs.publish_nightly.result == 'success' && 's3' || 'source' }}
+
+  test_website_import:
+    secrets: inherit
+    name: "Test Website Import"
+    uses: ./.github/workflows/release_website.yaml
+    with:
+      source_branch_name: main
+      models_branch_name: main
+      create_pr: false
+      import_models: true
+      import_mode: no-verify
+
+  notify_failure:
+    if: ${{ failure() && (github.event_name == 'schedule' || inputs.notify_slack) }}
+    name: Notify Failure
+    needs: [precommit_check, test_website_import, test_on_device_apps, publish_nightly]
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+    permissions:
+        contents: read
+        issues: write
+        actions: read
+
+    steps:
+      - name: Create GitHub Issue
+        id: create-github-issue
+        uses: actions/github-script@v9.0.0
+        with:
+          github-token: ${{ secrets.STAGING_GH_TOKEN }}
+          script: |
+            const today = new Date().toISOString().split('T')[0];
+            // Define job information
+            const jobs = {
+              'precommit_check': {
+                name: 'Pre-commit Hook Rules Check',
+                result: '${{ needs.precommit_check.result }}',
+                url: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/'
+              },
+              'test_website_import': {
+                name: 'Test Website Import',
+                result: '${{ needs.test_website_import.result }}',
+                url: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/'
+              },
+              'test_on_device_apps': {
+                name: 'Test AIHA Apps On-Device',
+                result: '${{ needs.test_on_device_apps.result }}',
+                url: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/'
+              },
+              'publish_nightly': {
+                name: 'Publish Nightly Dev Build',
+                result: '${{ needs.publish_nightly.result }}',
+                url: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/'
+              },
+            };
+            // Build failed jobs list
+            let failedJobsList = '';
+            let hasTestFailures = false;
+            for (const [jobId, jobInfo] of Object.entries(jobs)) {
+              if (jobInfo.result === 'failure') {
+                failedJobsList += `- [${jobInfo.name}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) (\`${jobId}\`)\n`;
+                if (jobId.startsWith('test_')) {
+                  hasTestFailures = true;
+                }
+              }
+            }
+            // Build issue body
+            let issueBody = `# 🚨 QAI Hub Apps Nightly Failed
+            Date: ${today}
+            ## Links
+            - [View Workflow Run Summary](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }})
+            ## Next Steps
+            1. Check the workflow summary tab for detailed error messages and stack traces
+            2. Determine appropriate ML Tech Team member for assignment of issue
+            3. Review individual job logs for specific failure causes
+            4. 📊 [Update the Nightly Failure Log spreadsheet](https://qualcomm.sharepoint.com/:x:/r/teams/TetraAI2/Shared%20Documents/model-zoo/QAIHA%20Nightly%20Failure%20Log.xlsx?d=w95a2e41217ca4026ac7bb2f9520b9bfd&csf=1&web=1&e=yhlaKv&nav=MTVfezNBMTU5NDhFLUE4QTYtNzE0Qy1CMERGLTg4RkRCRDQ1MDFGMn0)
+            ## Failed Jobs
+            ${failedJobsList}
+            `;
+            if (hasTestFailures) {
+              issueBody += `
+            ## Common Causes for Test Job Failures
+            **Check the individual job logs for:**
+            - Package installation errors (pip/uv timeouts)
+            - Import errors or missing dependencies
+            - Environment variable issues
+            - Platform-specific build failures
+            `;
+            }
+            issueBody += `## Workflow Info
+            - Source Repository: ${{ github.repository }}
+            - Branch: ${{ github.ref_name }}
+            - Triggered by: ${{ github.event_name }}
+            ---
+            Auto-created by nightly workflow failure notification`;
+            const result = await github.rest.issues.create({
+              owner: 'qcom-ai-hub',
+              repo: 'tetracode',
+              title: `QAI Hub Apps Nightly Failed - ${today}`,
+              body: issueBody,
+              labels: ['p0', 'ai-hub-apps']
+            });
+            console.log(`Created consolidated issue: ${result.data.html_url}`);
+            // Set output for Slack notification
+            core.setOutput('issue_url', result.data.html_url);
+
+      # Send result to Slack channel #ai-hub-apps
+      - name: Send Slack Notification
+        id: slack_notification
+        uses: slackapi/slack-github-action@v4.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_NOTIFIER_TOKEN }}
+          payload: |
+            channel: "C08KWAVBQNB"
+            text: |
+              🚨 QAI Hub Apps Nightly Failed
+              Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+              GitHub Issue: ${{ steps.create-github-issue.outputs.issue_url }}
+              App Results: ✅ ${{ fromJson(needs.test_on_device_apps.outputs.result_payload).summary.passed }} passed | ❌ ${{ fromJson(needs.test_on_device_apps.outputs.result_payload).summary.failed }} failed | ⏭ ${{ fromJson(needs.test_on_device_apps.outputs.result_payload).summary.skipped }} skipped
+              See full results table in the workflow summary.
+
+  notify_success:
+    name: Notify Success
+    needs: [publish_nightly, test_on_device_apps]
+    if: ${{ !cancelled() && needs.publish_nightly.result == 'success' && (github.event_name == 'schedule' || inputs.notify_slack) }}
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+    steps:
+      - name: Send Slack Notification
+        uses: slackapi/slack-github-action@v4.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_NOTIFIER_TOKEN }}
+          payload: |
+            channel: "C08KWAVBQNB"
+            text: |
+              🚀 QAI Hub Apps Nightly Dev Build Published
+              On-device tests: ${{ needs.test_on_device_apps.result == 'success' && '✅' || '❌' }} ${{ needs.test_on_device_apps.result }}
+              Install:
+              ```pip install --pre --index-url ${{ env.WHEEL_INDEX_URL }} --extra-index-url https://pypi.org/simple/ --trusted-host ${{ env.WHEEL_INDEX_HOST }} qai-hub-apps==${{ needs.publish_nightly.outputs.version }}```

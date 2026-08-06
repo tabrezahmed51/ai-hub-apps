@@ -1,25 +1,28 @@
 # exclude:
-# * third_party folders
+# * build directories
 # * CloudFormation templates don't pass the yaml-check hook (a known issue)
 
 exclude: |
-    (?x)(
+    (?x)
+    (
         /build/
+    |   ^playgrounds/
+    |   /snapshots/.*\.txt$
     )
 
 repos:
 -   repo: https://github.com/Lucas-C/pre-commit-hooks
     rev: v1.5.5
     hooks:
-     -  id: insert-license
+    -   id: insert-license
         files: \.py|\.sh$
         args:
             - --license-filepath
             - .pre-commit-license-header.txt
             - --allow-past-years
             - --no-extra-eol
-     -  id: insert-license
-        files: \.java$
+    -   id: insert-license
+        files: \.(java|kts?)$
         args:
             - --license-filepath
             - .pre-commit-license-header.txt
@@ -27,14 +30,14 @@ repos:
             - //
             - --allow-past-years
             - --no-extra-eol
-
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.1.0
+    rev: v5.0.0
     hooks:
     -   id: check-yaml
         args: [--allow-multiple-documents]
     -   id: trailing-whitespace
         exclude: '\.diff$'
+        args: [--markdown-linebreak-ext=md]
     -   id: check-added-large-files
         args: ['--maxkb=1024']
     -   id: check-merge-conflict
@@ -47,37 +50,106 @@ repos:
             )
     -   id: fix-byte-order-marker
 -   repo: https://github.com/rhysd/actionlint
-    rev: v1.6.26
+    rev: v1.7.7
     hooks:
-    - id: actionlint
+    -   id: actionlint
+        args: ['-ignore', 'SC2028', '-ignore', 'SC2129']
 -   repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: v0.9.0.6
+    rev: v0.10.0.1
     hooks:
     -   id: shellcheck
         exclude: gradlew
--   repo: https://github.com/pycqa/isort
-    rev: 5.12.0
-    hooks:
-    -   id: isort
-        args: ["--filter-files"]
--   repo: https://github.com/psf/black
-    rev: 22.1.0
-    hooks:
-    -   id: black
-        additional_dependencies: ['click==8.0.4']
+        args: ['--severity=warning']
 -   repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v13.0.1
     hooks:
     -   id: clang-format
         types_or: [c++, c, c#, cuda, objective-c, proto]
--   repo: https://github.com/pycqa/flake8
-    rev: 6.1.0
+-   repo: https://github.com/cpplint/cpplint
+    rev: 2.0.2
     hooks:
-    -   id: flake8
+    -   id: cpplint
+        args: [--quiet]
+        types_or: [c++, c]
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.13.0
+    hooks:
+    -   id: ruff-check
+        name: Ruff check (apps)
+        args: [--fix]
+        files: ^apps/
+    -   id: ruff-check
+        name: Ruff check (cli)
+        args: [--fix, --config=cli/ruff.toml]
+        files: ^cli/
+    -   id: ruff-check
+        name: Ruff check (tools)
+        args: [--fix, --config=tools/python/ruff.toml]
+        files: ^tools/python/
+    -   id: ruff-format
+        name: Ruff format (apps)
+        files: ^apps/
+    -   id: ruff-format
+        name: Ruff format (cli)
+        args: [--config=cli/ruff.toml]
+        files: ^cli/
+    -   id: ruff-format
+        name: Ruff format (tools)
+        args: [--config=tools/python/ruff.toml]
+        files: ^tools/python/
+-   repo: https://github.com/jsh9/pydoclint
+    rev: 0.7.3
+    hooks:
+    -   id: pydoclint
+        name: pydoclint (apps)
+        args: [--quiet, --config=pyproject.toml]
+        files: ^apps/
+    -   id: pydoclint
+        name: pydoclint (cli)
+        args: [--quiet, --config=cli/pyproject.toml]
+        files: ^cli/
+    -   id: pydoclint
+        name: pydoclint (tools)
+        args: [--quiet, --config=tools/python/pyproject.toml]
+        files: ^tools/python/
 -   repo: local
     hooks:
-        - id: mypy
-          name: mypy
-          files: \.(py|pyi|ipynb|proto|fbs)$
-          entry: scripts/util/run_mypy.sh
-          language: system
+    -   id: google-java-format
+        name: google-java-format
+        files: \.java$
+        entry: tools/lint/run_google_java_format.sh
+        language: system
+        require_serial: true
+    -   id: checkstyle
+        name: checkstyle
+        files: \.java$
+        entry: tools/lint/run_checkstyle.sh
+        language: system
+        require_serial: true
+    -   id: ktlint
+        name: ktlint
+        files: \.kts?$
+        entry: tools/lint/run_ktlint.sh
+        language: system
+        require_serial: true
+    -   id: mypy
+        name: mypy (cli)
+        files: ^cli/qai_hub_apps/.*\.(py|pyi)$
+        entry: tools/run_mypy.sh cli --warn-unused-configs --config-file=pyproject.toml -p qai_hub_apps
+        language: system
+        pass_filenames: false
+        require_serial: true
+    -   id: mypy
+        name: mypy (tools)
+        files: ^tools/python/qai_hub_apps_test/.*\.(py|pyi)$
+        entry: tools/run_mypy.sh tools/python --warn-unused-configs --config-file=pyproject.toml -p qai_hub_apps_test
+        language: system
+        pass_filenames: false
+        require_serial: true
+    -   id: mypy
+        name: mypy (apps)
+        files: ^apps/.*\.(py|pyi)$
+        entry: tools/run_mypy.sh . --ignore-missing-imports --explicit-package-bases --warn-unused-configs --config-file=pyproject.toml apps/
+        language: system
+        pass_filenames: false
+        require_serial: true

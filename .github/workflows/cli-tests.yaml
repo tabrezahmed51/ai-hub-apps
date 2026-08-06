@@ -1,0 +1,106 @@
+##
+## Re-usable workflow for running CLI test suites.
+## Do not attempt to change the triggers on this workflow.
+##
+
+name: CLI Tests
+
+env:
+  PYTHON_VERSION: '3.10'
+  PYTHONUNBUFFERED: 1
+
+on:
+  workflow_call:
+    inputs:
+      do_all:
+        required: true
+        type: boolean
+
+      do_precommit:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  ##
+  ## CLI unit + integration tests
+  ##
+  cli_tests:
+    name: "CLI Tests"
+    if: ${{ inputs.do_all || inputs.do_precommit }}
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - id: setup_python
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install Deps
+      run: |
+        ${{ steps.setup_python.outputs.python-path }} -m pip install -e 'cli/[dev]'
+
+    - name: Run CLI Tests
+      run: |
+        cd cli && ${{ steps.setup_python.outputs.python-path }} -m pytest \
+          -vv -ra -s \
+          --tb=short \
+          --strict-markers \
+          --color=yes
+
+    - name: Run CLI Integration Tests
+      run: |
+        cd cli && ${{ steps.setup_python.outputs.python-path }} -m pytest \
+          -vv \
+          --tb=short \
+          --strict-markers \
+          --color=yes \
+          --no-cov \
+          -m integration
+
+  ##
+  ## Bundler unit tests
+  ##
+  bundler_unit_tests:
+    name: "Bundler Unit Tests"
+    if: ${{ inputs.do_all || inputs.do_precommit }}
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+    env:
+      VENV_PATH: qaiha-dev
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - id: setup_python
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install Deps
+      env:
+        SUDO_PASSWORD: ${{ secrets.TETRASERVICE_PASSWORD }}
+      run: |
+        bash tools/setup_env.sh --python="${{ steps.setup_python.outputs.python-path }}" --venv="${{ env.VENV_PATH }}"
+
+    - name: Run Bundler Unit Tests
+      run: |
+        source ${{ env.VENV_PATH }}/bin/activate
+        cd tools/python && pytest \
+          -vv -ra -s \
+          --tb=short \
+          --strict-markers \
+          --color=yes \
+          -m bundler_unit
+
+    - name: Run Related Models Verification
+      run: |
+        source ${{ env.VENV_PATH }}/bin/activate
+        cd tools/python && pytest \
+          -vv -ra -s \
+          --tb=short \
+          --strict-markers \
+          --color=yes \
+          -m verify_related_models

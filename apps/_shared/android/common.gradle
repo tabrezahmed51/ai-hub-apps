@@ -1,0 +1,29 @@
+// Load versions from versions.env (relative to this file)
+// DONOT CHANGE THE PATH
+def versionsEnvFile = new File(buildscript.sourceFile.parentFile, "../../../_shared/scripts/versions.env").canonicalFile
+if (!versionsEnvFile.exists()) {
+    throw new GradleException("versions.env not found at ${versionsEnvFile}.")
+}
+versionsEnvFile.eachLine { line ->
+    def trimmed = line.trim()
+    if (!trimmed.startsWith('#') && trimmed.contains('=')) {
+        def idx = trimmed.indexOf('=')
+        def key = trimmed.substring(0, idx).trim()
+        def value = trimmed.substring(idx + 1).trim().replaceAll('^"|"$', '')
+        ext.set(key, value)
+    }
+}
+
+ext {
+    ANDROID_COMPILE_API = ext.ANDROID_COMPILE_API.toInteger()
+    ANDROID_MIN_API     = ext.ANDROID_MIN_API.toInteger()
+    ANDROID_TARGET_API  = ext.ANDROID_TARGET_API.toInteger()
+}
+
+task printExtVersions {
+    doFirst {
+        ext.properties.each { k, v ->
+            println "${k}=${v}"
+        }
+    }
+}

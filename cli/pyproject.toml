@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools >= 80", "setuptools-scm>=9,<10"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qai-hub-apps"
+authors = [
+    {name = "Qualcomm® Technologies, Inc", email = "ai_hub_support@qti.qualcomm.com"},
+]
+description = "CLI for browsing and downloading Qualcomm® AI Hub Apps."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "BSD-3-Clause"
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+dynamic = ["version"]
+dependencies = [
+    "qai-hub-models-cli==0.59.0",
+    "packaging>=24.2",
+    "platformdirs>=3.0",
+    "prettytable>=3.10,<=3.16.0",
+    "pydantic>=2.0",
+    "pyyaml",
+]
+
+[project.scripts]
+qai-hub-apps = "qai_hub_apps.main:main"
+
+[project.urls]
+Homepage = "https://aihub.qualcomm.com/apps"
+GitHub = "https://github.com/qualcomm/ai-hub-apps"
+
+[tool.setuptools.packages.find]
+include = ["qai_hub_apps*"]
+
+[tool.setuptools.exclude-package-data]
+"qai_hub_apps" = ["registry.yaml"]
+
+[tool.setuptools_scm]
+root = ".."
+version_file = "qai_hub_apps/_version.py"
+
+[project.optional-dependencies]
+dev = ["pytest==9.0.3", "pytest-mock==3.15.1", "pytest-cov==7.1.0"]
+
+[tool.pytest.ini_options]
+python_files = ["*_test.py"]
+testpaths = ["qai_hub_apps"]
+addopts = "--cov=qai_hub_apps --cov-report=term-missing --cov-fail-under=100 -m 'not integration'"
+
+[tool.coverage.report]
+omit = ["*_test.py", "*conftest.py"]
+
+[tool.pydoclint]
+style = 'numpy'
+arg-type-hints-in-docstring = false
+skip-checking-short-docstrings = true
+skip-checking-raises = true
+allow-init-docstring = true
+check-style-mismatch = true
+
+[tool.mypy]
+ignore_missing_imports = true
+warn_unused_ignores = true
+disable_error_code = ["import-untyped"]
+
+[[tool.mypy.overrides]]
+module = "qai_hub_apps.*"
+disable_error_code = ["type-abstract", "override", "method-assign"]
+check_untyped_defs = true

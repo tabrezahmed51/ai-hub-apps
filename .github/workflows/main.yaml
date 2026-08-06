@@ -1,0 +1,133 @@
+##
+## Pull Request Workflow
+##
+
+name: PR Workflow
+
+on:
+  push:
+    branches: [ main , release-* , staging/* ]
+  pull_request:
+    branches: [ main , release-* , staging/* ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# only one active job per PR. this will cause jobs to be immediately
+# cancelled on subsequent pushes in PRs.
+# ref: https://docs.github.com/en/actions/using-jobs/using-concurrency#example-using-a-fallback-value
+concurrency:
+  group: pr-workflow-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  determine_ci_steps:
+    name: "Determine CI Steps"
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+
+    outputs:
+      should_skip: ${{ steps.skip_check.outputs.should_skip }}
+      paths_result: ${{ steps.skip_check.outputs.paths_result }}
+      changed_files: ${{ steps.skip_check.outputs.changed_files }}
+    steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@v5.3.1
+        with:
+          # don't ever skip pushes (post-merge) or manual triggers
+          do_not_skip: '["push", "workflow_dispatch"]'
+
+          paths_ignore: '["**/*.md", "playgrounds/**"]'
+
+          # always include tools, github, and apps
+          paths: '["tools/**", ".github/**", "apps/**"]'
+
+  build-and-test-workflow:
+    name: B&T
+    needs: [determine_ci_steps]
+    secrets: inherit
+    uses: ./.github/workflows/build-and-test.yaml
+    with:
+      do_all: ${{ github.event_name == 'push' || (contains(github.event.pull_request.body, '%FORCE_ALL_CI%') && !contains(github.event.pull_request.body, '%SKIP_ALL_CI%')) }}
+      do_precommit: true # never skippable
+      changed_files: ${{ needs.determine_ci_steps.outputs.changed_files }}
+
+  detect_changed_apps:
+    name: "Detect Changed Apps"
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+    env:
+      VENV_PATH: qaiha-dev
+      PYTHON_VERSION: '3.10'
+    outputs:
+      has_app_changes: ${{ steps.detect.outputs.has_app_changes }}
+      app_filter: ${{ steps.detect.outputs.app_filter }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: setup_python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up environment (with CLI)
+        run: |
+          bash tools/setup_env.sh \
+            --python="${{ steps.setup_python.outputs.python-path }}" \
+            --venv="${{ env.VENV_PATH }}" \
+            --with-cli
+
+      - name: Generate test registry (test scope)
+        run: |
+          source ${{ env.VENV_PATH }}/bin/activate
+          python -m qai_hub_apps_test.scripts.generate_registry \
+            --output_dir cli/qai_hub_apps/ --scope test
+
+      - id: detect
+        name: Find updated registered app IDs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          source ${{ env.VENV_PATH }}/bin/activate
+          if ! git rev-parse --verify --quiet "${BASE_SHA}^{commit}" > /dev/null; then
+            # No usable base (manual run or first push to a new branch): default to main.
+            echo "::notice::No base commit to diff against (BASE_SHA='${BASE_SHA}'); defaulting to origin/main."
+            BASE_SHA="origin/main"
+          fi
+          git diff --name-only "$BASE_SHA"...HEAD > changed.txt
+          python tools/ci/find_updated_apps.py --diff-file changed.txt >> $GITHUB_OUTPUT
+
+  build_changed_apps:
+    name: "Build Changed Apps"
+    needs: [detect_changed_apps]
+    if: ${{ needs.detect_changed_apps.outputs.has_app_changes == 'true' }}
+    secrets: inherit
+    uses: ./.github/workflows/test_aiha_apps.yaml
+    with:
+      test_stage: build
+      model_selection: first
+      app_filter: ${{ needs.detect_changed_apps.outputs.app_filter }}
+
+  # The build_changed_apps matrix has dynamic, per-PR job names and is skipped entirely when no apps change.
+  # This job always runs and reports a single fixed status: pass when builds succeed or were correctly skipped, fail otherwise.
+  ensure_builds_pass:
+    name: "Ensure Builds Pass"
+    needs: [detect_changed_apps, build_changed_apps]
+    if: always()
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+    steps:
+      - name: Verify build result
+        run: |
+          detect_result="${{ needs.detect_changed_apps.result }}"
+          build_result="${{ needs.build_changed_apps.result }}"
+          echo "detect_changed_apps result: $detect_result"
+          echo "build_changed_apps result:  $build_result"
+          if [[ "$detect_result" != "success" ]]; then
+            echo "::error::Detect Changed Apps did not succeed (result: $detect_result)"
+            exit 1
+          fi
+          # 'skipped' is OK (no app changes); 'success' is OK. Anything else
+          # (failure, cancelled) should block the merge.
+          if [[ "$build_result" != "success" && "$build_result" != "skipped" ]]; then
+            echo "::error::Build Changed Apps did not pass (result: $build_result)"
+            exit 1
+          fi

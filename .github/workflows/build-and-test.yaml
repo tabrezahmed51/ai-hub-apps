@@ -1,0 +1,126 @@
+##
+## Re-usable worfklow for building and testing everything.
+## Do not attempt to change the triggers on this workflow.
+##
+
+name: Build & Test
+
+env:
+  # Versions MUST be quoted, otherwise they will be interpreted as a floats
+  # (and version like 3.10 can be interpreted as 3.1).
+  PYTHON_VERSION: '3.10'
+  PYTHONUNBUFFERED: 1
+
+on:
+  # Allows this workflow to be callable
+  workflow_call:
+    inputs:
+      do_all:
+        required: true
+        type: boolean
+
+      do_precommit:
+        required: false
+        type: boolean
+        default: false
+
+      # Whether this is scheduled or not
+      scheduled:
+        required: false
+        type: boolean
+        default: false
+
+      # List of files changes
+      changed_files:
+        required: false
+        type: string
+
+jobs:
+  ##
+  ## Pre-commit hook rules check
+  ##
+  precommit_check:
+    name: "Pre-commit Hook Rules Check"
+    if: ${{ inputs.do_all || inputs.do_precommit }}
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+    env:
+      VENV_PATH: qaiha-dev
+    steps:
+    - uses: actions/checkout@v7
+    - id: setup_python
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install Deps
+      env:
+        SUDO_PASSWORD: ${{ secrets.TETRASERVICE_PASSWORD }}
+      run: |
+        bash tools/setup_env.sh --python="${{ steps.setup_python.outputs.python-path }}" --venv="${{ env.VENV_PATH }}" --extras precommit
+        source "${{ env.VENV_PATH }}/bin/activate"
+
+    - name: Run Pre-Commit
+      id: pre-commit
+      run: |
+        source ${{ env.VENV_PATH }}/bin/activate && pre-commit run --show-diff-on-failure --color=always --all-files
+
+  ##
+  ## Generated-file freshness checks (registry.yaml + build scripts)
+  ##
+  check_generated_files:
+    name: "Check generated files are up to date"
+    if: ${{ inputs.do_all || inputs.do_precommit }}
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+    env:
+      VENV_PATH: qaiha-dev
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - id: setup_python
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install Deps
+      env:
+        SUDO_PASSWORD: ${{ secrets.TETRASERVICE_PASSWORD }}
+      run: |
+        bash tools/setup_env.sh --python="${{ steps.setup_python.outputs.python-path }}" --venv="${{ env.VENV_PATH }}"
+
+    - name: Check registry.yaml
+      run: |
+        source ${{ env.VENV_PATH }}/bin/activate
+        python -m qai_hub_apps_test.scripts.generate_registry --output_dir cli/qai_hub_apps/
+        if [[ -n $(git diff) || -n $(git ls-files --others --exclude-standard) ]]; then
+          git diff
+          git ls-files --others --exclude-standard
+          echo ""
+          echo "registry.yaml is out of date."
+          echo "Please run: python -m qai_hub_apps_test.scripts.generate_registry --output_dir cli/qai_hub_apps/"
+          exit 1
+        fi
+
+    - name: Check build scripts
+      run: |
+        source ${{ env.VENV_PATH }}/bin/activate
+        python -m qai_hub_apps_test.scripts.generate_build_scripts --scope test
+        if [[ -n $(git diff) || -n $(git ls-files --others --exclude-standard) ]]; then
+          git diff
+          git ls-files --others --exclude-standard
+          echo ""
+          echo "Build scripts are out of date."
+          echo "Please run: python -m qai_hub_apps_test.scripts.generate_build_scripts --scope test"
+          exit 1
+        fi
+
+  ##
+  ## CLI unit + integration tests
+  ##
+  cli_tests:
+    name: "CLI Tests"
+    if: ${{ inputs.do_all || inputs.do_precommit }}
+    uses: ./.github/workflows/cli-tests.yaml
+    with:
+      do_all: ${{ inputs.do_all }}
+      do_precommit: ${{ inputs.do_precommit }}

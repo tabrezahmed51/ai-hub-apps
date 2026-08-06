@@ -1,0 +1,72 @@
+name: Mirror to Public Repository
+
+on:
+  push:
+    branches:
+      - main
+
+# Serialize runs so rapid pushes don't race and overwrite each other's commits
+concurrency:
+  group: mirror-to-public
+
+jobs:
+  mirror-history:
+    name: Mirror to History Branch
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main-history
+
+      - name: Fetch triggering commit and extract metadata
+        id: meta
+        run: |
+          git fetch origin ${{ github.sha }} --depth=1
+          {
+            echo "author_name=$(git log -1 ${{ github.sha }} --format='%an')"
+            echo "author_email=$(git log -1 ${{ github.sha }} --format='%ae')"
+            echo "author_date=$(git log -1 ${{ github.sha }} --format='%aI')"
+            echo "committer_name=$(git log -1 ${{ github.sha }} --format='%cn')"
+            echo "committer_email=$(git log -1 ${{ github.sha }} --format='%ce')"
+            echo "committer_date=$(git log -1 ${{ github.sha }} --format='%cI')"
+          } >> "$GITHUB_OUTPUT"
+          # Message may be multiline; write to a file
+          git log -1 ${{ github.sha }} --format='%B' > /tmp/commit_message.txt
+
+      - name: Mirror to main-history branch
+        env:
+          GIT_AUTHOR_NAME: ${{ steps.meta.outputs.author_name }}
+          GIT_AUTHOR_EMAIL: ${{ steps.meta.outputs.author_email }}
+          GIT_AUTHOR_DATE: ${{ steps.meta.outputs.author_date }}
+          GIT_COMMITTER_NAME: ${{ steps.meta.outputs.committer_name }}
+          GIT_COMMITTER_EMAIL: ${{ steps.meta.outputs.committer_email }}
+          GIT_COMMITTER_DATE: ${{ steps.meta.outputs.committer_date }}
+        run: |
+          # Replace the index with the triggering commit's tree
+          git read-tree --reset ${{ github.sha }}
+          if git diff --cached --quiet HEAD; then
+            echo "No changes to commit"
+          else
+            git commit -F /tmp/commit_message.txt
+            git push origin HEAD:main-history -f
+          fi
+
+  mirror-public:
+    name: Push to Public Repo
+    runs-on: [tetra-ubuntu-2204, self-hosted]
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push commit to public repo main
+        env:
+          GH_TOKEN: ${{ secrets.PROD_GH_TOKEN }}
+        run: |
+          git config --local credential.helper '!f() { echo "username=x-access-token"; echo "password=$GH_TOKEN"; }; f'
+          git remote add public https://github.com/qualcomm/ai-hub-apps.git
+          git push public HEAD:main -f

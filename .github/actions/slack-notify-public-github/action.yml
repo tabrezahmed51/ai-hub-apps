@@ -1,0 +1,46 @@
+name: Notify public GitHub activity on Slack
+
+description: Sanitize a user-supplied title and post a notification to Slack
+
+inputs:
+  emoji:
+    description: Slack emoji for the message
+    required: true
+  message:
+    description: Message (e.g. "New issue created")
+    required: true
+  github-user-content-title:
+    description: Raw user-supplied title to sanitize
+    required: true
+  github-user-content-url:
+    description: URL to link in the message
+    required: true
+  channel:
+    description: Slack channel ID
+    required: true
+  token:
+    description: Slack bot token
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build payload
+      shell: bash
+      env:
+        EMOJI: ${{ inputs.emoji }}
+        MESSAGE: ${{ inputs.message }}
+        GITHUB_USER_CONTENT_TITLE: ${{ inputs.github-user-content-title }}
+        GITHUB_USER_CONTENT_URL: ${{ inputs.github-user-content-url }}
+        CHANNEL: ${{ inputs.channel }}
+      run: |
+        safe_title=$(printf '%s' "$GITHUB_USER_CONTENT_TITLE" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+        safe_url=$(printf '%s' "$GITHUB_USER_CONTENT_URL" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+        jq -n --arg channel "$CHANNEL" \
+              --arg text "$EMOJI [Public GitHub] $MESSAGE: <$safe_url|$safe_title>" \
+              '{channel: $channel, text: $text}' > /tmp/slack_api_payload.json
+    - uses: slackapi/slack-github-action@v3
+      with:
+        method: chat.postMessage
+        token: ${{ inputs.token }}
+        payload-file-path: /tmp/slack_api_payload.json
