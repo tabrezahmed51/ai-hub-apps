@@ -7,6 +7,7 @@
 # winget provides by default on the host (ARM64 on Snapdragon).
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$env:QAIHA_APP_ROOT = $ScriptDir
 
 . ..\_shared\scripts\load_versions.ps1
 . ..\_shared\scripts\winget_utils.ps1

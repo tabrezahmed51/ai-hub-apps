@@ -11,9 +11,6 @@
 #       versions.env) via apt. Also installs python3-venv and pip, then
 #       bootstraps uv for fast package management.
 #
-# Override the version before sourcing or before calling:
-#   PYTHON_VERSION=3.12
-#   install_python
 #
 # Usage: source python_utils.sh
 # ---------------------------------------------------------------------
@@ -26,6 +23,12 @@ source "$_PYTHON_UTILS_DIR/apt_utils.sh"
 source "$_PYTHON_UTILS_DIR/interactive.sh"
 # shellcheck disable=SC1091
 source "$_PYTHON_UTILS_DIR/retry.sh"
+
+# uv is the last thing _install_python does, so its presence for this interpreter
+# means the whole install completed.
+_python_installed() {
+    "python${PYTHON_VERSION}" -m uv --version >/dev/null 2>&1
+}
 
 _install_python() {
     local ver="${PYTHON_VERSION}"
@@ -47,6 +50,10 @@ _install_python() {
 }
 
 install_python() {
+    if _python_installed; then
+        echo "::skip::Python ${PYTHON_VERSION} already installed"
+        return 0
+    fi
     require_consent "Install Python ${PYTHON_VERSION} and dependencies via apt (uses sudo)" \
         -- _install_python "$@"
 }

@@ -10,10 +10,10 @@ import logging
 import shutil
 import tempfile
 import zipfile
-from collections.abc import ValuesView
+from collections.abc import Callable, ValuesView
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from packaging.version import Version
 from prettytable import PrettyTable
@@ -28,13 +28,8 @@ from qai_hub_models_cli.utils import (
 from qai_hub_models_cli.versions import CURRENT_VERSION as QAIHM_VERSION
 
 from qai_hub_apps import __version__, _is_dev
-from qai_hub_apps.registry.remote import ensure_registry
-
-try:
-    from qai_hub_apps_test.bundlers import bundle_app as _bundle_app
-except ImportError:  # pragma: no cover
-    _bundle_app = None
 from qai_hub_apps.configs.app_yaml import AppInfo, AppLanguage, AppStatus
+from qai_hub_apps.configs.manifest import Manifest, ModelProvenance
 from qai_hub_apps.configs.model_asset import ModelAsset
 from qai_hub_apps.configs.registry_yaml import AppRegistry
 from qai_hub_apps.errors import (
@@ -45,18 +40,27 @@ from qai_hub_apps.errors import (
     QAIHubAppsError,
 )
 from qai_hub_apps.logging_utils import is_quiet
-from qai_hub_apps.utils.devices import device_to_chipset
+from qai_hub_apps.registry.remote import ensure_registry
+from qai_hub_apps.utils.devices import is_aot_runtime
 from qai_hub_apps.utils.github import make_issue_url
+from qai_hub_apps.utils.scripts import confirm
 from qai_hub_apps.validate import is_app_supported
+
+# _internal is dev-only tooling, absent from released wheels.
+_bundle_app: Callable[..., None] | None
+try:
+    from qai_hub_apps._internal.bundlers import bundle_app as _bundle_app
+except ImportError:  # pragma: no cover
+    _bundle_app = None
+
+if TYPE_CHECKING:
+    from qai_hub_apps.registry.filters import AppFilter
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DEPRECATION_MESSAGE = (
     "This app is deprecated and may be removed in a future release."
 )
-
-# Provenance file written into every fetched app dir.
-MANIFEST_FILENAME = "qai_hub_apps.json"
 
 
 class App:
@@ -118,44 +122,10 @@ class App:
                 f"Supported devices: {available}"
             )
 
-    def _resolve_device_chipset(self, device: str) -> str:
-        """Resolve a ``supported_devices`` entry to its chipset.
-
-        An entry that is not a known AI Hub device is a bug in the app's
-        registry data, surfaced with a link to file an issue.
-        """
-        try:
-            chipset = device_to_chipset(device)
-            logger.debug(
-                "Resolved supported device '%s' to chipset '%s' for app '%s'",
-                device,
-                chipset,
-                self.id,
-            )
-            return chipset
-        except KeyError as e:
-            issue_url = make_issue_url(
-                title=f"Unknown supported_device for app '{self.id}'",
-                body=(
-                    f"App: {self.id}\n"
-                    f"Version: {__version__}\n"
-                    f"supported_devices entry: {device}\n"
-                    f"AI Hub Models version: {QAIHM_VERSION}\n"
-                    f"Error: {e}"
-                ),
-            )
-            raise AppIncompatibleError(
-                f"Supported device '{device}' for app '{self.id}' is not a "
-                f"known AI Hub device. This is likely a bug - please file an "
-                f"issue and we'll look into it:\n  {issue_url}"
-            ) from e
-
     @functools.cached_property
     def supported_chipsets(self) -> frozenset[str]:
         """The chipsets of the app's ``supported_devices``, resolved and cached."""
-        return frozenset(
-            self._resolve_device_chipset(device) for device in self.supported_devices
-        )
+        return frozenset(d.chipset for d in self.supported_devices)
 
     def _ensure_chipset_supported(self, chipset: str) -> None:
         """Raise if *chipset* is not one of the app's supported chipsets.
@@ -199,8 +169,8 @@ class App:
         # Dev install + no URL: bundle from source on-the-fly.
         if _bundle_app is None:
             raise QAIHubAppsError(
-                "Dev install detected but qai_hub_apps_test is not installed. "
-                "Install it with: pip install -e tools/python/"
+                "Dev install detected but qai_hub_apps._internal is not available. "
+                "Install it with: pip install -e 'cli/[dev]'"
             )
         logger.debug("Dev install: bundling '%s' from source...", self.id)
         # bundle_app with make_zip=False writes to tmp/<app_id>/ == staged
@@ -334,13 +304,18 @@ class App:
         return metadata
 
     def _place_model_in_app(
-        self, model_dir: Path, app_dir: Path, metadata: dict
+        self, model_dir: Path, app_dir: Path, metadata: dict, model_asset: ModelAsset
     ) -> None:
         """Move a model asset's files into the app's source tree.
 
         Uses ``model_file_paths`` (renaming each file to its destination name) or,
         if unset, ``model_file_dir`` (dropping files in as-is).
+
+        Any files recorded from a previously placed model are removed first, and
+        the files placed by this call are recorded in the provenance manifest.
         """
+        self._remove_recorded_model_files(app_dir)
+        placed: list[str] = []
         model_id = metadata["model_id"]
         src_names = list(metadata["model_files"].keys())
         logger.debug(
@@ -369,20 +344,6 @@ class App:
                     f"This is likely a bug - please file an issue and we'll look into it:\n"
                     f"  {issue_url}"
                 )
-            dst_parents = {Path(p).parent for p in dst_paths}
-            if len(dst_parents) > 1:
-                issue_url = make_issue_url(
-                    title=f"model_file_paths directory mismatch for app '{self.id}'",
-                    body=(
-                        f"App: {self.id}\n"
-                        f"model_file_paths: {[str(p) for p in dst_paths]}"
-                    ),
-                )
-                raise AppIncompatibleError(
-                    f"All model_file_paths for '{self.id}' must share the same parent directory. "
-                    f"This is likely a bug - please file an issue and we'll look into it:\n"
-                    f"  {issue_url}"
-                )
             # Build rename map: original filename -> desired destination filename
             rename_map = {
                 src_name: Path(dst_rel).name
@@ -396,6 +357,7 @@ class App:
             )
             for item in model_dir.iterdir():
                 dest_name = rename_map.get(item.name, item.name)
+                placed.append(str(models_dest.relative_to(app_dir) / dest_name))
                 if item.name == "metadata.json":
                     # Update model_files keys to reflect renames, then write
                     updated_files = {
@@ -414,7 +376,158 @@ class App:
             models_dest.mkdir(parents=True, exist_ok=True)
             logger.debug("Dropping model files as-is into %s", models_dest)
             for item in model_dir.iterdir():
+                placed.append(str(models_dest.relative_to(app_dir) / item.name))
                 shutil.move(str(item), models_dest / item.name)
+
+        manifest = Manifest.load(app_dir)
+        manifest.model = ModelProvenance(
+            model_id=str(model_id), requested=model_asset, files=placed
+        )
+        manifest.write(app_dir)
+
+    @staticmethod
+    def bundled_model(app_dir: Path) -> ModelProvenance | None:
+        """Return the model recorded in *app_dir*, or None if none is recorded."""
+        return Manifest.load(app_dir).model
+
+    def bundles(self, app_dir: Path, model_asset: ModelAsset) -> bool:
+        """Whether the model recorded in *app_dir* was fetched for *model_asset*.
+
+        False when nothing is recorded, so an app with no model counts as not
+        bundling the requested one. The requested chipset/device only counts for
+        an ahead-of-time compiled runtime, whose assets are chipset-specific;
+        for any other runtime it does not select the asset, so a request that
+        names a different target still bundles the same model.
+        """
+        bundled = self.bundled_model(app_dir)
+        if bundled is None or bundled.requested is None:
+            return False
+        requested = bundled.requested
+        if (requested.model_id, requested.path) != (
+            model_asset.model_id,
+            model_asset.path,
+        ):
+            return False
+        if not is_aot_runtime(self.runtime[0]):
+            return True
+        return requested.resolved_chipset() == model_asset.resolved_chipset()
+
+    @staticmethod
+    def _remove_recorded_model_files(app_dir: Path) -> None:
+        """Delete the model files a previous placement recorded in the manifest."""
+        previous = Manifest.load(app_dir).model
+        if previous is None:
+            return
+        logger.debug("Removing previously placed model files: %s", previous.files)
+        for name in previous.files:
+            stale = app_dir / name
+            if stale.is_dir():
+                shutil.rmtree(stale)
+            elif stale.exists():
+                stale.unlink()
+
+    def _validate_model_asset(
+        self, model_asset: ModelAsset, no_model_hint: str
+    ) -> None:
+        """Raise if *model_asset* cannot be bundled into this app."""
+        if self.disable_cli_model_fetch:
+            raise AppIncompatibleError(
+                f"App '{self.id}' downloads its model at runtime and bundles no model files. "
+                f"{no_model_hint}"
+            )
+
+        if not self.model_file_paths and not self.model_file_dir:
+            raise AppIncompatibleError(
+                f"No model_file_paths or model_file_dir configured for app '{self.id}'."
+            )
+
+        # An auto-resolved `--model` whose value is both a supported model
+        # and an existing path is ambiguous.
+        if model_asset.path is not None:
+            if str(model_asset.path) in self.related_models:
+                raise InvalidArgumentError(
+                    f"'{model_asset.path}' is both a supported model id and a local path. "
+                    "Use --model-id or --model-path to disambiguate."
+                )
+            return
+
+        assert model_asset.model_id is not None  # must be set when path is None
+        self._ensure_model_supported(model_asset)
+
+    def _stage_and_validate_model(
+        self, model_asset: ModelAsset, tmp: Path
+    ) -> tuple[Path, dict]:
+        """Stage *model_asset* under *tmp* and validate it against this app."""
+        model_tmp = tmp / "model_asset"
+        self._stage_model(model_asset, model_tmp)
+        metadata = self._read_model_metadata(model_tmp, model_asset)
+        logger.debug("Validating staged model against app '%s'", self.id)
+        meta_model_id = metadata["model_id"]
+        if model_asset.path is not None:
+            # check the local model is supported by the app
+            self._ensure_model_supported(ModelAsset(model_id=meta_model_id))
+        elif meta_model_id != model_asset.model_id:
+            # the downloaded asset's model should match the requested one
+            issue_url = make_issue_url(
+                title=f"Model asset id mismatch for app '{self.id}'",
+                body=(
+                    f"App: {self.id}\n"
+                    f"Requested model ID: {model_asset.model_id}\n"
+                    f"metadata.json model ID: {meta_model_id}\n"
+                    f"AI Hub Models version: {QAIHM_VERSION}"
+                ),
+            )
+            raise AppIncompatibleError(
+                f"The downloaded model asset for '{self.id}' reports model id "
+                f"'{meta_model_id}', but '{model_asset.model_id}' was requested. "
+                f"This is likely a bug - please file an issue and we'll look into it:\n"
+                f"  {issue_url}"
+            )
+        return model_tmp, metadata
+
+    def switch_model(self, app_dir: Path, model_asset: ModelAsset) -> bool:
+        """Replace the model bundled in an already-fetched app, on confirmation.
+
+        Returns True when the model was replaced, and False when there is
+        nothing to switch. Declining raises.
+        """
+        logger.debug(
+            "switch_model('%s'): app_dir=%s, model_asset=%r",
+            self.id,
+            app_dir,
+            model_asset,
+        )
+        if not app_dir.is_dir():
+            logger.debug("No app fetched at %s; nothing to switch", app_dir)
+            return False
+        if self.bundles(app_dir, model_asset):
+            logger.debug("'%s' already bundles %r", self.id, model_asset)
+            return False
+
+        self._validate_model_asset(
+            model_asset,
+            no_model_hint="There is no bundled model to switch.",
+        )
+        bundled = self.bundled_model(app_dir)
+        existing = f"model '{bundled.model_id}'" if bundled is not None else "no model"
+        if not confirm(
+            f"'{app_dir.as_posix()}' already exists with {existing}. "
+            f"Bundle {model_asset} into it?"
+        ):
+            named = f" ({bundled.model_id})" if bundled is not None else ""
+            raise InvalidArgumentError(
+                f"Model replace declined. Re-run without the model option to use "
+                f"the bundled model{named}."
+            )
+
+        with tempfile.TemporaryDirectory() as _tmp:
+            tmp = Path(_tmp)
+            logger.debug("Using temporary staging directory %s", tmp)
+            model_tmp, metadata = self._stage_and_validate_model(model_asset, tmp)
+            self._place_model_in_app(model_tmp, app_dir, metadata, model_asset)
+
+        logger.info("Switched '%s' to model '%s'.", self.id, metadata["model_id"])
+        return True
 
     def fetch(
         self,
@@ -427,7 +540,7 @@ class App:
         If the destination already exists, ``overwrite`` removes it and fetches
         in place; otherwise the app is saved to a non-colliding ``-N`` sibling.
         """
-        logger.debug("fetch('%s'): dest=%s, model_asset=%s", self.id, dest, model_asset)
+        logger.debug("fetch('%s'): dest=%s, model_asset=%r", self.id, dest, model_asset)
         app_dest = dest / self.id
 
         if app_dest.exists():
@@ -442,8 +555,11 @@ class App:
                 app_dest = new_dest
 
         is_model_required = model_asset is not None
-        is_model_local = model_asset is not None and model_asset.path is not None
-        logger.debug("Model required=%s, local=%s", is_model_required, is_model_local)
+        logger.debug(
+            "Model required=%s, local=%s",
+            is_model_required,
+            model_asset is not None and model_asset.path is not None,
+        )
 
         with tempfile.TemporaryDirectory() as _tmp:
             tmp = Path(_tmp)
@@ -451,61 +567,17 @@ class App:
 
             if is_model_required:
                 assert model_asset is not None
-                if self.disable_cli_model_fetch:
-                    raise AppIncompatibleError(
-                        f"App '{self.id}' downloads its model at runtime and bundles no model files. "
-                        f"Re-run without --model:\n  qai-hub-apps fetch {self.id}"
-                    )
-
-                if not self.model_file_paths and not self.model_file_dir:
-                    raise AppIncompatibleError(
-                        f"No model_file_paths or model_file_dir configured for app '{self.id}'."
-                    )
-
-                # An auto-resolved `--model` whose value is both a supported model
-                # and an existing path is ambiguous.
-                if is_model_local and str(model_asset.path) in self.related_models:
-                    raise InvalidArgumentError(
-                        f"'{model_asset.path}' is both a supported model id and a local path. "
-                        "Use --model-id or --model-path to disambiguate."
-                    )
-
-                if not is_model_local:
-                    assert (
-                        model_asset.model_id is not None
-                    )  # must be set when path is None
-                    self._ensure_model_supported(model_asset)
+                self._validate_model_asset(
+                    model_asset,
+                    no_model_hint=f"Re-run without --model:\n  qai-hub-apps fetch {self.id}",
+                )
 
             staged = self._stage_app(tmp)
 
             if is_model_required:
                 assert model_asset is not None
-                model_tmp = tmp / "model_asset"
-                self._stage_model(model_asset, model_tmp)
-                metadata = self._read_model_metadata(model_tmp, model_asset)
-                logger.debug("Validating staged model against app '%s'", self.id)
-                meta_model_id = metadata["model_id"]
-                if is_model_local:
-                    # check the local model is supported by the app
-                    self._ensure_model_supported(ModelAsset(model_id=meta_model_id))
-                elif meta_model_id != model_asset.model_id:
-                    # the downloaded asset's model should match the requested one
-                    issue_url = make_issue_url(
-                        title=f"Model asset id mismatch for app '{self.id}'",
-                        body=(
-                            f"App: {self.id}\n"
-                            f"Requested model ID: {model_asset.model_id}\n"
-                            f"metadata.json model ID: {meta_model_id}\n"
-                            f"AI Hub Models version: {QAIHM_VERSION}"
-                        ),
-                    )
-                    raise AppIncompatibleError(
-                        f"The downloaded model asset for '{self.id}' reports model id "
-                        f"'{meta_model_id}', but '{model_asset.model_id}' was requested. "
-                        f"This is likely a bug - please file an issue and we'll look into it:\n"
-                        f"  {issue_url}"
-                    )
-                self._place_model_in_app(model_tmp, staged, metadata)
+                model_tmp, metadata = self._stage_and_validate_model(model_asset, tmp)
+                self._place_model_in_app(model_tmp, staged, metadata, model_asset)
 
             self._write_manifest(staged)
 
@@ -516,17 +588,13 @@ class App:
         return app_dest
 
     def _write_manifest(self, app_dir: Path) -> None:
-        """Write the provenance manifest recording the versions that fetched this app."""
-        manifest = {
-            "cli_version": __version__,
-            "qai_hub_models_version": self.qaihm_version or str(QAIHM_VERSION),
-            "registry_version": Registry.load().version,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
-        }
-        (app_dir / MANIFEST_FILENAME).write_text(
-            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-        )
-        logger.debug("Wrote manifest %s: %s", MANIFEST_FILENAME, manifest)
+        """Record the versions that fetched this app, keeping any model provenance."""
+        manifest = Manifest.load(app_dir)
+        manifest.cli_version = __version__
+        manifest.qai_hub_models_version = self.qaihm_version or str(QAIHM_VERSION)
+        manifest.registry_version = Registry.load().version
+        manifest.fetched_at = datetime.now(timezone.utc).isoformat()
+        manifest.write(app_dir)
 
     def __repr__(self) -> str:
         banner_lines = [self.name]
@@ -644,6 +712,21 @@ class Registry:
             logger.debug("App '%s' not found in registry", app_id)
             raise AppNotFoundError(app_id)
         return app
+
+    def filter(self, app_filter: AppFilter) -> list[App]:
+        """Return the apps matching *app_filter*, in registry order.
+
+        Parameters
+        ----------
+        app_filter
+            The criteria to match against.
+
+        Returns
+        -------
+        list[App]
+            The matching apps.
+        """
+        return [app for app in self.apps if app_filter.matches(app)]
 
     @property
     def version(self) -> str:

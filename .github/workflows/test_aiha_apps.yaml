@@ -33,8 +33,6 @@ on:
     secrets:
       QDC_API_TOKEN:
         required: false
-      DOCKER_QC_REGISTRY_TOKEN:
-        required: false
       HUB_USER_TOKEN_PROD:
         required: false
       QAIHA_CI_AWS_ROLE_ARN:
@@ -120,7 +118,7 @@ jobs:
         if: ${{ inputs.install_source == 'source' }}
         run: |
           source ${{ env.VENV_PATH }}/bin/activate
-          python -m qai_hub_apps_test.scripts.generate_registry \
+          python -m qai_hub_apps._internal.scripts.generate_registry \
             --output_dir cli/qai_hub_apps/ --scope test
 
       - id: list
@@ -149,11 +147,13 @@ jobs:
       app_type: ubuntu
       model_selection: ${{ inputs.model_selection }}
       test_stage: ${{ inputs.test_stage }}
+      # TODO: restore once the base images are public. The docker build happens on
+      # the QDC device, which cannot authenticate to the private GHCR package.
+      use_docker: false
       version: ${{ inputs.version }}
       install_source: ${{ inputs.install_source }}
     secrets:
       QDC_API_TOKEN: ${{ secrets.QDC_API_TOKEN }}
-      DOCKER_QC_REGISTRY_TOKEN: ${{ secrets.DOCKER_QC_REGISTRY_TOKEN }}
       QAIHA_CI_AWS_ROLE_ARN: ${{ secrets.QAIHA_CI_AWS_ROLE_ARN }}
 
 
@@ -172,11 +172,11 @@ jobs:
       app_type: android
       model_selection: ${{ inputs.model_selection }}
       test_stage: ${{ inputs.test_stage }}
+      use_docker: true
       version: ${{ inputs.version }}
       install_source: ${{ inputs.install_source }}
     secrets:
       QDC_API_TOKEN: ${{ secrets.QDC_API_TOKEN }}
-      DOCKER_QC_REGISTRY_TOKEN: ${{ secrets.DOCKER_QC_REGISTRY_TOKEN }}
       QAIHA_CI_AWS_ROLE_ARN: ${{ secrets.QAIHA_CI_AWS_ROLE_ARN }}
 
 
@@ -195,11 +195,11 @@ jobs:
       app_type: windows
       model_selection: ${{ inputs.model_selection }}
       test_stage: ${{ inputs.test_stage }}
+      use_docker: true
       version: ${{ inputs.version }}
       install_source: ${{ inputs.install_source }}
     secrets:
       QDC_API_TOKEN: ${{ secrets.QDC_API_TOKEN }}
-      DOCKER_QC_REGISTRY_TOKEN: ${{ secrets.DOCKER_QC_REGISTRY_TOKEN }}
       HUB_USER_TOKEN_PROD: ${{ secrets.HUB_USER_TOKEN_PROD }}
       QAIHA_CI_AWS_ROLE_ARN: ${{ secrets.QAIHA_CI_AWS_ROLE_ARN }}
 

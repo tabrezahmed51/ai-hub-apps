@@ -5,20 +5,22 @@
 # ---------------------------------------------------------------------
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export QAIHA_APP_ROOT="$SCRIPT_DIR"
 
+source ../_shared/scripts/pip_utils.sh
 source ../_shared/scripts/qairt_utils.sh
 
 TEST_VIDEO_URL="https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-apps/apps/posenet_ubuntu_py/pose.mp4"
 TEST_VIDEO="$SCRIPT_DIR/pose.mp4"
 
-if [ ! -f "$SCRIPT_DIR/.venv/bin/activate" ]; then
-    echo "error: virtual environment not found. Run install_runtime.sh first." >&2
-    exit 1
-fi
-source "$SCRIPT_DIR/.venv/bin/activate"
+activate_venv
 
 wget -q -O "$TEST_VIDEO" "$TEST_VIDEO_URL"
 
+# Force decodebin to use the installed libav software decoder.
+export GST_PLUGIN_FEATURE_RANK="v4l2h264dec:0,qtivdec:0,qtivdechw:0"
+
 python main.py \
     --video-gstreamer-source "filesrc location=$TEST_VIDEO ! decodebin" \
-    --qairt-path "$QAIRT_PATH"
+    --qairt-path "$QAIRT_PATH" \
+    "$@"

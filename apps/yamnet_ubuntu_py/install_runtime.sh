@@ -5,6 +5,7 @@
 # ---------------------------------------------------------------------
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export QAIHA_APP_ROOT="$SCRIPT_DIR"
 
 source ../_shared/scripts/python_utils.sh
 source ../_shared/scripts/apt_utils.sh
@@ -18,10 +19,12 @@ $SUDO apt-add-repository -y ppa:ubuntu-qcom-iot/qcom-ppa
 $SUDO apt-get update -q
 
 install_apt_pkgs \
+    qcom-fastrpc-dev \
     libsndfile1 \
+    libportaudio2 \
     ffmpeg \
     qcom-libdmabufheap
 
 install_apt_pkg unzip
 
-install_pip_deps --venv "$SCRIPT_DIR/.venv" -r "$SCRIPT_DIR/requirements.txt"
+install_pip_deps -r "$SCRIPT_DIR/requirements.txt"

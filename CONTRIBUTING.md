@@ -12,6 +12,9 @@ This guide covers dev environment setup, repo architecture, app conventions, tes
 - [info.yaml Schema](#infoyaml-schema)
 - [Shared Scripts](#shared-scripts-apps_sharedscripts)
 - [Shared Python Utilities](#shared-python-utilities-qai_hub_apps_utils)
+- [Building Apps](#building-apps)
+- [Running Apps](#running-apps)
+- [Experimental CLI Features](#experimental-cli-features)
 - [Testing Infrastructure](#testing-infrastructure)
 - [Code Style and Linting](#code-style-and-linting)
 - [Adding a New App](#adding-a-new-app)
@@ -28,6 +31,16 @@ This guide covers dev environment setup, repo architecture, app conventions, tes
 
 > [!IMPORTANT]
 > The expected contributor environment is a **Linux or macOS host**. Some dev dependencies (e.g. `onnxruntime` via `qai_hub_models`) lack `win-arm64` wheels, so the full tooling — including `generate_registry` — may not install cleanly on native Windows.
+>
+> **Install git-lfs and run `git lfs install` *before cloning*.** Binary assets are
+> LFS-tracked (see `.gitattributes`) — including the static bash shim at
+> `cli/qai_hub_apps/_internal/qdc/bash_static/bash-static-x86_64` that the Android
+> QDC tests bundle. A clone made without git-lfs, or with `GIT_LFS_SKIP_SMUDGE=1` set,
+> leaves these as ~130-byte text pointer files. Nothing checks this locally, so the
+> failure surfaces remotely and late: the pointer is bundled, uploaded, and the device
+> job fails with an exec-format error. If you already cloned, `git lfs install && git lfs
+> pull` fixes it; confirm with
+> `sha256sum -c cli/qai_hub_apps/_internal/qdc/bash_static/bash-static-x86_64.sha256`.
 >
 > **On Windows, enable Developer Mode and set `git config --global core.symlinks true` *before cloning*.** Otherwise symlinks are checked out as plain text files and builds will fail.
 
@@ -47,12 +60,11 @@ Available flags for `setup_env.sh`:
 | `--with-qdc-sdk` | Download and install the Qualcomm Device Cloud SDK wheel |
 | `--venv <path>` | Custom venv path (default: `qaiha-dev`) |
 | `--python <exe>` | Python executable to use (default: `python3`) |
-| `--extras <name>` | Extras to install: `dev` (default) or `precommit` |
 
 ### Pre-commit Hooks
 
 ```bash
-pip install pre-commit && pre-commit install
+pre-commit install
 
 # Run all hooks manually
 pre-commit run --all-files
@@ -61,14 +73,8 @@ pre-commit run --all-files
 pre-commit run --config .pre-commit-line-ending-check.yaml --all-files
 ```
 
-The Java/Kotlin hooks (`google-java-format`, `ktlint`) need a JVM toolchain.
-Bootstrapping with the `precommit` extra provisions it automatically into
-`.lint-tools/` (git-ignored):
-
-```bash
-bash tools/setup_env.sh --extras precommit     # Linux
-. tools/setup_env.ps1 -Extras precommit        # Windows
-```
+The Java/Kotlin hooks (`google-java-format`, `checkstyle`, `ktlint`) need a JVM toolchain.
+`setup_env` provisions it automatically into `.lint-tools/` (git-ignored).
 
 Tool versions are pinned in `tools/versions.env`.
 
@@ -81,14 +87,20 @@ ai-hub-apps/
 ├── apps/               # Sample applications (one subdirectory per app)
 │   └── _shared/        # Shared scripts, Gradle config, Python utilities
 ├── cli/                # qai-hub-apps CLI package (fetch, list, info)
+│   └── qai_hub_apps/
+│       └── _internal/  # Internal tooling: bundlers, script generators, QDC,
+│                       # config parsers. Dev-only -- excluded from the wheel.
 ├── tools/
-│   ├── python/         # qai_hub_apps_test: bundlers, builders, QDC, CI scripts
-│   └── ci/             # CI utility scripts (download-qdc-wheel, build reports)
+│   ├── ci/             # CI utility scripts (download-qdc-wheel, build reports)
+│   ├── docker/         # Base images for app builds
+│   └── lint/           # Java/Kotlin lint toolchain installers
 ├── .github/workflows/  # GitHub Actions CI/CD
 └── pyproject.toml      # Root Python config (pydoclint, mypy)
 ```
 
 ### The CLI ↔ Registry Flow
+
+The CLI is organized around three stages — **fetch → build → run** — mirroring the on-device test flow:
 
 ```
 generate_registry.py
@@ -97,11 +109,37 @@ generate_registry.py
 qai-hub-apps fetch <app_id> --model <model_id>
   └─ downloads app source (from S3 or bundled dev source) + model asset
      └─ dev installs: bundles on-the-fly via bundlers/ (no S3 needed)
+     └─ writes a provenance manifest (qai_hub_apps.json) into the fetched dir
+
+qai-hub-apps build <app_id_or_path>          # experimental (see below)
+  └─ fetches the app if needed, then execs the bundled build.sh / build.ps1
+
+qai-hub-apps configure                       # experimental — pick & persist a target device
+qai-hub-apps run <app_id_or_path>            # experimental (see below)
+  └─ validates run-compatibility, builds if needed, then execs the bundled
+     launch.sh / launch.ps1 (which drives the app's run.sh / run.ps1)
 ```
+
+### Fetch provenance manifest
+
+Every `fetch` writes a `qai_hub_apps.json` manifest into the fetched app directory
+(`App._write_manifest`, `cli/qai_hub_apps/registry/base.py`) recording the versions
+that produced the bundle:
+
+| Field | Source |
+|-------|--------|
+| `cli_version` | `qai_hub_apps.__version__` |
+| `qai_hub_models_version` | the app's `qaihm_version`, else the installed `qai_hub_models` version |
+| `registry_version` | `Registry.load().version` |
+| `fetched_at` | UTC ISO-8601 timestamp of the fetch |
+
+This is provenance only — which app/model *content* was fetched already lives in the
+model's `metadata.json`, so the manifest deliberately does not duplicate it. It lets
+support/CI reconstruct exactly which toolchain produced a given fetched app.
 
 ### The Bundlers
 
-The bundler packages an app into a self-contained directory or zip for distribution. See [`tools/python/qai_hub_apps_test/bundlers/README.md`](tools/python/qai_hub_apps_test/bundlers/README.md) for full details.
+The bundler packages an app into a self-contained directory or zip for distribution. See [`cli/qai_hub_apps/_internal/bundlers/README.md`](cli/qai_hub_apps/_internal/bundlers/README.md) for full details.
 
 - **Android bundler** — deep copies the app directory resolving all symlinks, copies and rewrites shell script `source` lines to bundle-local paths (same as Python bundler), inlines version variables from `versions.env` into `build.gradle`, and empties `common.gradle`
 - **Python bundler** — scans app source with AST to find `qai_hub_apps_utils` imports, copies only the needed shared modules (see [Shared Python Utilities](#shared-python-utilities-qai_hub_apps_utils)), merges `requirements.txt`, and rewrites shell script `source` lines to bundle-local paths
@@ -111,7 +149,7 @@ The bundler packages an app into a self-contained directory or zip for distribut
 
 | Package | Location | Purpose |
 |---------|----------|---------|
-| `qai_hub_apps_test` | `tools/python/` | Bundlers, builders, QDC, config parsers — see [`tools/python/README.md`](tools/python/README.md) |
+| `qai_hub_apps._internal` | `cli/qai_hub_apps/_internal/` | Bundlers, script generators (registry + build), QDC, config parsers. Dev-only: stripped from the released wheel — see [`cli/qai_hub_apps/_internal/README.md`](cli/qai_hub_apps/_internal/README.md) |
 | `qai_hub_apps` (CLI) | `cli/` | End-user CLI — see [`cli/README.md`](cli/README.md) |
 
 ---
@@ -170,7 +208,8 @@ App directories follow the pattern: `{app_name}_{platform}[_{language}]`
 ├── info.yaml
 ├── README.md
 ├── install_runtime.sh      # sources shared scripts (python_utils, pip_utils, etc.)
-├── test.sh                 # entry point run on-device by run_linux.sh (e.g. runs main.py)
+├── test.sh                 # smoke test run on-device via 'qai-hub-apps test' (e.g. runs main.py)
+├── run.sh                  # hand-written env-agnostic launch (see Running Apps)
 ├── requirements.txt
 └── <source files>
 ```
@@ -184,11 +223,12 @@ App directories follow the pattern: `{app_name}_{platform}[_{language}]`
 ├── info.yaml               ├── info.yaml
 ├── README.md               ├── README.md
 ├── <App>.sln               ├── install_runtime.ps1
-├── <App>.vcxproj           ├── requirements.txt
-├── vcpkg.json              └── <source files>
+├── <App>.vcxproj           ├── run.ps1
+├── vcpkg.json              ├── requirements.txt
+├── run.ps1                 └── <source files>
 └── src/
 ```
-
+`run.ps1` is the hand-written, env-agnostic launch script (see [Running Apps](#running-apps)).
 ---
 
 ## info.yaml Schema
@@ -215,7 +255,7 @@ Every app must have an `info.yaml`. Copy from a similar app and adjust.
 | `languages` | list | e.g. `['Java']`, `['Python']`, `['Java', 'C++']` |
 | `related_models` | list | All compatible model IDs (used for CLI fetch + testing). The first entry is the seed model tested on-device. CI fails if any entry has no AI Hub Models asset matching the app's `runtime`/`precisions`/`supported_devices` |
 | `precisions` | list | e.g. `[float]`, `[w4a16]` |
-| `supported_devices` | list | Device names — **must match a key in `HUB_DEVICE_TO_QDC_DEVICE_MAP`** in `tools/python/qai_hub_apps_test/qdc/qdc_jobs.py` |
+| `supported_devices` | list of mappings | Each entry has `name` (**must match a key in `HUB_DEVICE_TO_QDC_DEVICE_MAP`** in `cli/qai_hub_apps/_internal/qdc/qdc_jobs.py`) and `status` (`Tested` \| `Not Tested`, default `Not Tested`). Exactly one entry must be `Tested` — that is the device the app is tested on in CI. See [Supported devices](#supported-devices) |
 | `license_type` | `bsd-3-clause` | License (almost always BSD-3) |
 | `license_url` | string | Link to LICENSE file |
 | `app_repo_relative_path` | string | Path within the public repo, usually `id` (e.g. `image_classification_android`) |
@@ -232,6 +272,22 @@ Every app must have an `info.yaml`. Copy from a similar app and adjust.
 | `skip_related_models_verify` | — | String reason to skip `related_models` verification for this app |
 | `app_repo_url` | — | Explicit GitHub URL (overrides `app_repo_relative_path` — use for external repos) |
 | `qaihm_version` | — | Explicit Qualcomm AI Hub Models CLI version to use when dowloading model assets. By default, the installed version of the models-cli is used, if provided, this version will be used instead |
+
+### Supported devices
+
+```yaml
+supported_devices:
+  - name: "Snapdragon 8 Elite QRD"
+    status: "Tested"
+  - name: "Snapdragon 8 Elite Gen 5 QRD"
+    status: "Not Tested"
+```
+
+Exactly one entry must be marked `Tested`; the on-device (nightly) test uses that
+device for its QDC job and its chipset for `qai-hub-apps fetch`. The generated CLI
+`registry.yaml` keeps only the device names — test status is internal to CI. (The
+CLI's `AppInfo` accepts either form and normalizes to names, so a registry carrying
+the structured entries still loads.)
 
 ### App Status
 
@@ -269,10 +325,24 @@ TF_LITE_VERSION, TF_LITE_SUPPORT_VERSION, QNN_VERSION
 JAVA_SDK_VERSION, GRADLE_VERSION
 ANDROID_NDK_VERSION, ANDROID_COMPILE_API, ANDROID_TARGET_API, ANDROID_MIN_API
 QAIRT_SDK_VERSION, QAIRT_SDK_FULL_VERSION
-PYTHON_VERSION, ONNX_RUNTIME_VERSION
+PYTHON_VERSION, ONNX_RUNTIME_VERSION, ONNX_RUNTIME_QNN_EP_VERSION
+{ANDROID,UBUNTU,WINDOWS}_BASE_IMAGE, _BASE_IMAGE_TAG
 ```
 
+The `*_BASE_IMAGE*` pins are read by the generated per-app `Dockerfile`s — see
+[Prebuilt Docker base images](#prebuilt-docker-base-images).
+
 Android `build.gradle` reads these at build time via `common.gradle`. Shell scripts source them via `load_versions.sh`.
+
+> [!IMPORTANT]
+> For using any shared scripts, **`QAIHA_APP_ROOT`** (the app directory) must be set
+> before using the utilities.
+
+#### Per-app version overrides
+
+To override versions for an app, add them to `apps/<id>/versions.override.env`
+(creating the file if needed) — same `KEY="VALUE"` format; its keys win over the
+global `versions.env`. Example: `apps/whisper_windows_py/versions.override.env` pins `PYTHON_VERSION="3.12"` for win-arm64.
 
 ### Bash utilities (`.sh`)
 
@@ -280,22 +350,37 @@ Android `build.gradle` reads these at build time via `common.gradle`. Shell scri
 |--------|-----------|-------------|
 | `android_utils.sh` | `install_android_sdk [--force]` | Installs SDKMAN → Java → Gradle → Android SDK + NDK. Also exports `ANDROID_HOME`, `JAVA_HOME`, `GRADLE_HOME`. |
 | `qairt_utils.sh` | `install_qairt [--force]` | Downloads and extracts QAIRT SDK. Exports `QAIRT_ROOT`, `QAIRT_PATH`. |
-| `apt_utils.sh` | `install_apt_pkg <pkg>`, `install_apt_pkgs <pkg>...` | Idempotent apt installation |
-| `python_utils.sh` | `install_python` | Installs Python + venv + uv |
-| `pip_utils.sh` | `install_pip_deps [--venv <dir>] <req>...` | Creates `.venv` and installs via uv |
+| `apt_utils.sh` | `install_apt_pkg <pkg> [apt_args...]`, `install_apt_pkgs <pkg>...` | Idempotent apt installation — each package is skipped (`::skip::`) if `dpkg-query` already reports it installed. `install_apt_pkgs` batches the consent prompt over only the missing ones. |
+| `python_utils.sh` | `install_python` | Installs `python$PYTHON_VERSION` (via the deadsnakes PPA) + venv + dev + uv. Skips when that interpreter can already run `uv`. |
+| `pip_utils.sh` | `install_pip_deps [--venv <dir>] <req>...`, `activate_venv [<dir>]` | Creates the venv and installs via uv; `activate_venv` resolves the *same* directory, so callers pass nothing. Default `$QAIHA_APP_ROOT/.venv`, else `$PWD/.venv`; `$QAIHA_VENV_OVERRIDE` wins over both (the docker path sets it to a location outside `/app`, which the app bind mount would otherwise shadow). |
+| `sudo.sh` | sets `$SUDO` | `""` when already root or `sudo` is absent, else `"sudo"`. Source before privileged commands — it is what lets the same scripts run as root in a container and unprivileged on a host. |
+| `interactive.sh` | `require_consent [--skip-on-decline] <desc> -- <cmd>...` | y/N gate for system-mutating commands. Auto-passes when `NON_INTERACTIVE=true` or `INTERACTIVE_GRANTED=1`; on approval it exports `INTERACTIVE_GRANTED=1` for that subtree so one approval covers nested calls. Declining aborts, or with `--skip-on-decline` emits `::skip::` and returns non-zero. |
+| `retry.sh` | `with_retry [--attempts N] [--backoff S] <desc> -- <cmd>...` | Retries a flaky command (default 3 attempts, 5s base backoff), returning the final exit code so callers under `set -e` still abort. |
+| `exit_codes.sh` | sets `$QAIHA_EXIT_BUILD_REQUIRED` | Exit code (86) a launch/run script uses to tell the CLI the app is not built yet; `run` then builds and retries once. Kept in sync with `BUILD_REQUIRED_EXIT_CODE` in `qai_hub_apps.experimental.commands.run` and with `exit_codes.ps1`. |
 
 ### PowerShell utilities (`.ps1`)
 
 | Script | Functions |
 |--------|-----------|
 | `qairt_utils.ps1` | `Install-Qairt [-Force]` — exports `$env:QAIRT_ROOT`, `$env:QAIRT_PATH` |
-| `winget_utils.ps1` | `Install-WingetPackage` |
+| `winget_utils.ps1` | `Install-WingetPackage -Id <id> [-ExtraArgs <string[]>]`, `Install-WingetPackages -Ids <string[]>` |
+| `msvc_utils.ps1` | `Install-MSVC` — installs VS 2022 Build Tools with the C++ ARM64 toolchain via winget, then exports `$env:MSBUILD_EXE` |
+| `vcpkg_utils.ps1` | `Install-Vcpkg` — clones + bootstraps vcpkg, runs `vcpkg integrate install`, exports `$env:VCPKG_ROOT` (manifest-mode `vcpkg.json` deps then restore during MSBuild); `Install-NuGet` — installs the NuGet CLI via winget and exports `$env:NUGET_EXE` |
 | `python_utils.ps1` | `Install-Python` |
-| `pip_utils.ps1` | `Install-PipDeps` |
+| `pip_utils.ps1` | `Install-PipDeps [-VenvDir <path>] [-Python <exe>] [-Packages <string[]>] [-ExtraArgs <string[]>]`, `Activate-Venv [-VenvDir <path>]` |
+| `interactive.ps1` | `Invoke-WithConsent -Description <str> [-SkipOnDecline] -Action { … }` — PowerShell equivalent of `require_consent` |
+| `retry.ps1` | `Invoke-WithRetry -Description <str> [-Attempts N] [-Backoff S] -Action { … }` |
+| `exit_codes.ps1` | sets `$QAIHA_EXIT_BUILD_REQUIRED` — the `exit_codes.sh` counterpart |
 
 ### `NON_INTERACTIVE` environment variable
 
-Set `NON_INTERACTIVE=true` (done automatically in Docker/CI) to auto-accept SDK licenses without prompting. Leave unset for interactive developer use.
+Set `NON_INTERACTIVE=true` to auto-accept every `require_consent` /
+`Invoke-WithConsent` prompt *and* the Android SDK licenses, without asking. Leave unset
+for interactive developer use.
+
+It is set automatically wherever there is no TTY: the base dockerfiles (`ENV
+NON_INTERACTIVE=true`, which is also what lets them install the toolchain by sourcing
+these same utils at build time) and the QDC device scripts.
 
 ---
 
@@ -335,38 +420,306 @@ Browse `apps/_shared/python/qai_hub_apps_utils/` for the available modules and t
 
 ---
 
+## Building Apps
+
+Building an app is driven by a per-app **build script** — `build.sh` (bash) for
+Ubuntu/Android apps, `build.ps1` (PowerShell) for Windows apps — that ships inside
+the app bundle. The CLI's `build` command is a thin wrapper: it resolves/fetches the
+app, then execs the bundled script. Keeping the build logic *in the script* (not in
+the CLI) means a fetched app is buildable on its own — a user who runs `fetch` can
+build it directly with `bash build.sh` without the CLI installed.
+
+### Scripts are generated, not hand-written
+
+Build **and** launch scripts are produced from Jinja2 templates by
+`cli/qai_hub_apps/_internal/scripts/generate_app_scripts.py` — the same pattern
+as `generate_registry.py`. Each in-scope app gets a `build.sh` / `build.ps1` (see
+below) and a `launch.sh` / `launch.ps1` (see [Running Apps](#running-apps)).
+**Do not hand-edit a committed `build.*` / `launch.*`** — edit the template and
+regenerate.
+
+```bash
+# Generate for every in-scope app (default scope: production)
+python -m qai_hub_apps._internal.scripts.generate_app_scripts
+
+# CI regenerates with --scope test and fails if the result differs from what's committed
+python -m qai_hub_apps._internal.scripts.generate_app_scripts --scope test
+
+# Single app
+python -m qai_hub_apps._internal.scripts.generate_app_scripts --app_id posenet_ubuntu_py
+```
+
+The generated script (and the shared scripts it sources, e.g. `interactive.sh`) is
+carried into the bundle by the [shell bundler](cli/qai_hub_apps/_internal/bundlers/README.md).
+
+### Templates by app type
+
+The generator picks a template from the app's `app_type` + `languages`
+(`_build_plan()` in `generate_app_scripts.py`). Templates live under
+`cli/qai_hub_apps/_internal/scripts/templates/`:
+
+| App type | Template | Output | What it does |
+|----------|----------|--------|--------------|
+| Android | `android/build_sh.j2` | `build.sh` | Docker build → `gradle assembleDebug assembleAndroidTest` → `docker cp` the APKs out |
+| Windows C++ | `windows/build_ps1.j2` | `build.ps1` | MSBuild the `.sln` for ARM64 (native via `-NoDocker`, or in a Windows container) |
+| Ubuntu Python | `noop_build_sh.j2` | `build.sh` | No-op — prints "Nothing to build; run it directly" |
+| Windows Python | `noop_build_ps1.j2` | `build.ps1` | No-op (PowerShell variant) |
+
+An app whose `app_type` / `languages` combination matches none of the above (e.g. an
+Android app with no build recipe) makes the generator **fail loudly** (`SystemExit`)
+rather than silently skip it.
+
+### Common script conventions
+
+- **Args:** `--no-docker` / `--docker` (docker is the default) and `--clean`. The
+  PowerShell equivalents are `-NoDocker` and `-Clean`.
+- **`--clean`** tears down prior build state — host-side outputs, the Docker image,
+  and any leftover container — then rebuilds with `--no-cache`. Note that only
+  invalidates the app's own trivial `FROM` layer, not the base image; to force a fresh
+  base, `docker rmi` it or rebuild it with `--no-cache`. Without `--clean` the image is
+  left in place so the next build reuses its cache.
+- **Container lifetime:** the transient build container is removed on exit (bash
+  `trap`, PowerShell `finally`); the *image* is kept for cache reuse. Image/container
+  names are derived from a hash of the app directory so two copies of the same app in
+  different directories never collide.
+- **Leftover container:** if a container from a prior run still holds the name (e.g.
+  after a hard kill), the script asks the user before removing it, via
+  `require_consent` (bash) / `Invoke-WithConsent` (PowerShell) from
+  `apps/_shared/scripts/interactive.{sh,ps1}`.
+- **Error handling:** bash uses `set -euo pipefail`; PowerShell sets
+  `$ErrorActionPreference = "Stop"` **and** an `Assert-Success` helper checked after
+  each native command (because `Stop` does not abort on a non-zero native exit code,
+  only on cmdlet errors).
+
+### Prebuilt Docker base images
+
+An app's Docker build is `FROM` a prebuilt base image that already holds the whole
+toolchain (Android SDK/NDK, MSVC, the Ubuntu Python + GStreamer prerequisites), so a
+first-time `build`/`run` costs a pull instead of tens of minutes of installs. The
+per-app `Dockerfile` is generated and committed alongside `build.*` / `launch.*`, and
+is just `ARG BASE_IMAGE=<pinned ref>` / `FROM ${BASE_IMAGE}`. An app gets one only if
+its `info.yaml` sets `base_docker`, whose filename also selects the pin
+(`android.dockerfile` → `ANDROID_BASE_IMAGE`/`_TAG` in
+`apps/_shared/scripts/versions.env`).
+
+The bases live in `tools/docker/{android,ubuntu,windows}.dockerfile` and are published
+to GHCR by the `publish_base_images.yaml` workflow (`workflow_dispatch` only, on
+GitHub-hosted runners). They install their toolchain by sourcing the *same* shared
+scripts the app path uses (`RUN source /app/scripts/python_utils.sh && install_python`),
+so `install_runtime.sh`'s skip predicates match what was baked by construction rather
+than by a hand-maintained list.
+
+To build a base locally and bypass the pin entirely, export `QAIHA_BASE_IMAGE` — it
+takes precedence over `versions.env` in every generated `build.*` / `launch.*`:
+
+```bash
+bash tools/build_base_images.sh android          # or: ubuntu, all
+export QAIHA_BASE_IMAGE=qai-hub-apps-android-base:local
+```
+
+`tools/build_base_images.ps1` builds `android` or `windows` on a Windows host (a docker
+daemon serves linux *or* windows containers, not both, so the platform is explicit).
+Both scripts take `--push`/`-Push` plus `--registry`/`-Registry`, which is how the
+workflow publishes; note the Windows script builds and pushes in two steps because
+buildx is not available for windows containers.
+
+**To upgrade an image:** dispatch `publish_base_images.yaml`, bump the matching
+`*_BASE_IMAGE_TAG` in `apps/_shared/scripts/versions.env` to the `sha-<12-char sha>` it
+pushed, re-run `generate_app_scripts --scope test`, and commit. Bumping the Ubuntu tag
+replaces every user's container (`launch.sh` drops a container whose image id no longer
+matches), forcing a full `install_runtime.sh` re-run, so bump it sparingly.
+
+### Qualcomm-network-only setup (`QC_INTERNAL_HOST`)
+
+TLS is intercepted on the Qualcomm network, so a container cannot reach anything until
+the Qualcomm CA roots are installed. When `QC_INTERNAL_HOST=1` the generated
+`launch.sh` (Ubuntu) and `build.sh` / `build.ps1` (Android) `docker exec` the roots
+into the **container** after starting it — Android additionally imports them into the
+JVM truststore with `keytool`, because Gradle ignores the OS trust store. Off the
+internal network the block is skipped entirely, so external contributors build
+unchanged.
+
+`tools/docker/{android,ubuntu}.dockerfile` still accept a
+`REGISTRY_PREFIX` build arg to pull `ubuntu:24.04` from an internal mirror, but
+nothing in CI passes it — the base images cannot be built on the Qualcomm network at
+all (SDKMAN's own `curl` and the JVM truststore are out of reach of any `wget` flag).
+
+The workflow (`test-app.yaml`) sets `QC_INTERNAL_HOST: '1'`.
+
+### CI keeps generated scripts in sync
+
+`build-and-test.yaml`'s **"Check generated files are up to date"** job regenerates
+both the registry and the app scripts — `build.*` and `launch.*` (`--scope test`) —
+and fails if the working tree differs, so a template change with stale committed
+output is caught in CI, just like `registry.yaml`. Regenerate and commit whenever you
+touch a template or add an app.
+
+---
+
+## Running Apps
+
+Running mirrors building, but with **two** layers so an app can run identically
+whether the CLI orchestrates it or a user runs it by hand:
+
+- **`launch.sh` / `launch.ps1`** — the **generated** orchestrator (sibling of
+  `build.*`, same `generate_app_scripts.py` + Jinja templates; **do not hand-edit**).
+  It prepares the execution environment for the app's `app_type` — native vs Docker,
+  installing runtime deps, or `adb` install — then invokes the app's run script.
+- **`run.sh` / `run.ps1`** — **hand-written** and environment-agnostic (sibling of
+  `test.*`). It runs the app with sensible defaults and forwards any passthrough args;
+  it assumes deps are already installed and does not know or care about Docker. Android
+  apps have **no** run script — their `launch.sh` installs and launches the APK via
+  `adb` directly.
+
+The CLI's experimental `run` command is a thin wrapper: `qai-hub-apps run
+<app_id_or_path>` resolves (and, given an id, fetches + builds) the app, validates it
+can run on this host and target device (`ensure_run_supported`,
+`cli/qai_hub_apps/experimental/validate/platform_check.py`), then execs the bundled
+`launch.*`. Keeping the launch logic *in the script* means a fetched app runs on its
+own with `bash launch.sh` (no CLI needed).
+
+### Launch templates by app type
+
+`_launch_plan()` in `generate_app_scripts.py` picks the template from `app_type`:
+
+| App type | Template | Output | What it does |
+|----------|----------|--------|--------------|
+| Ubuntu Python | `ubuntu/launch_sh.j2` | `launch.sh` | Native (`install_runtime.sh` → `run.sh`) or Docker (build the runtime image, run `run.sh` inside with the device env forwarded). The container **persists** between launches and is reused, so `install_runtime.sh` runs every launch and is expected to skip what is already installed. It is replaced only when the image id changes. |
+| Android | `android/launch_sh.j2` | `launch.sh` | `adb`: pick a connected device (auto if one, prompt if many), `adb install` the APK, launch it via `monkey` |
+| Windows (C++ / Python) | `windows/launch_ps1.j2` | `launch.ps1` | **Native only** — Windows has no runtime container; runs `install_runtime.ps1` if present (Python apps), then `run.ps1` |
+
+An `app_type` with no launch template makes the generator **fail loudly**
+(`SystemExit`), like the build side.
+
+### Target device and the run environment
+
+`qai-hub-apps configure` picks and persists a target device; `run` injects it into
+the launch/run environment as `QAI_HUB_APPS_*` variables (`DEVICE_NAME`,
+`HEXAGON_VERSION`, `DEVICE_OS`, `CHIPSET`, `SOC_MODEL`). Apps read them via
+`qai_hub_apps_utils.platform.get_current_device()` — see [Shared Python
+Utilities](#shared-python-utilities-qai_hub_apps_utils). Android runs ignore the
+configured device (that's the build host) and prompt for a mobile device each run.
+
+### Common conventions
+
+- **Args:** `--no-docker` / `--docker` mirror the build scripts (Ubuntu default is
+  Docker; **Windows is always native**, so the flag is a no-op there). Everything
+  after a `--` separator is passthrough: `qai-hub-apps run <app> -- <app_args>`
+  forwards `<app_args>` through `launch.*` to the app's `run.*`.
+- **Error handling:** same as the build scripts — bash `set -euo pipefail`; PowerShell
+  `$ErrorActionPreference = "Stop"`.
+
+---
+
+## Experimental CLI Features
+
+Some CLI features are **experimental** — opt-in, unstable, and hidden from end users
+until they graduate. The `build`, `run`, `configure`, and `test` commands are currently
+experimental (`test` is `run` with an internal `--test` flag, used by the on-device
+stage; see [Testing Infrastructure](#testing-infrastructure)).
+
+The gate lives in `cli/qai_hub_apps/experimental/__init__.py` and is driven entirely
+by the `QAI_HUB_APPS_EXPERIMENTAL` environment variable (`1`/`true`/`yes`/`on`):
+
+- `is_enabled()` — returns whether the env var is set to a truthy value.
+- `add_experimental_parser(subparsers, name, **kwargs)` — registers an experimental
+  subcommand **only** when experimental features are enabled; otherwise it returns a
+  throwaway `ArgumentParser` so `main.py` can keep configuring the parser
+  unconditionally. When enabled, the command's `help` text is tagged `[experimental]`.
+
+Because the subparser is only *registered* when the env var is set, the command is
+invisible in `--help` (and unrunnable) for normal users, with no `argparse` internals
+poked. To use or test it:
+
+```bash
+QAI_HUB_APPS_EXPERIMENTAL=1 qai-hub-apps build <app_id_or_path>
+```
+
+The build stage (`device_apps_test.py`) sets this env var for its host `build`
+subprocess, and the device scripts set it before `qai-hub-apps test`, so CI exercises
+the experimental commands without any global opt-in.
+
+---
+
 ## Testing Infrastructure
 
 ### How testing works by app type
 
-Testing follows three stages, implemented in `tools/python/qai_hub_apps_test/test/device_apps_test.py`:
+Testing follows three stages, implemented in `cli/qai_hub_apps/_internal/test/device_apps_test.py`:
 
-1. **Fetch** — `qai-hub-apps fetch <app_id> --model <model_id>` downloads app source + model asset
-2. **Build** — platform-specific build step (see below)
-3. **On-device** — submits the built app to Qualcomm Device Cloud (QDC) for execution on real hardware
+1. **Fetch** — `qai-hub-apps fetch <app_id> --model <model_id> --output-dir <fetched_dir>` downloads app source + model asset
+2. **Build** — `qai-hub-apps build --app-path <fetched_dir>` runs the app's bundled build script (see [Building Apps](#building-apps))
+3. **On-device** — submits the built app to Qualcomm Device Cloud (QDC), where the device installs the `qai-hub-apps` CLI and runs `qai-hub-apps test --app-path <bundle>`
+
+The build stage shells out to the real CLI (`build` is experimental, so the test sets
+`QAI_HUB_APPS_EXPERIMENTAL=1`), which execs the shipped `build.sh` / `build.ps1`. It
+builds *in place* from the already-fetched directory, so no model is re-fetched. This
+means the test exercises the exact build path an end user gets. A missing/failed build
+script fails the stage loudly (no silent skip).
+
+The **on-device** stage runs the app through the CLI, exactly as a user would (rather
+than invoking `test.sh` directly). The device always installs a bundled `qai-hub-apps`
+wheel — never from an index — with dependencies resolved from PyPI, which every QDC
+device can reach. `--cli-source` only selects how the *host* obtains that wheel:
+`source` (the default) builds one from the checkout via `tools/ci/build_cli_wheel.py`,
+`s3` downloads the nightly dev wheel, `prod` downloads the PyPI release. The wheel is
+obtained once per session (the session-scoped `cli_bundle` fixture) and staged into the
+bundle along with the matching `registry.yaml`, passed via `--registry` because the wheel
+ships without one and the device can't fetch it from S3. For `source` that registry is
+whatever `cli/qai_hub_apps/registry.yaml` currently holds in the checkout — production
+scope as committed, so regenerate it at `--scope test` before a local run (see [Running
+tests locally](#running-tests-locally)); for `s3`/`prod` it's resolved on the host against
+the installed wheel's own version. `qai-hub-apps test` is `run` with an internal `--test` flag: it execs the generated
+`launch.*`, which runs the app's `test.sh` / `test.ps1` (Ubuntu/Windows) or the
+`am instrument` instrumentation flow (Android) instead of `run.*`. The device scripts
+(`qdc/device_scripts/run_{linux.sh,windows.ps1,android.py}`) just install the CLI and
+invoke it — `launch.*` owns install-runtime and docker/native execution.
 
 #### Android apps
 
-- **Build:** Docker container with `BUILD_TYPE=build` runs `install_build.sh` (installs Android SDK) then `gradle assembleDebug assembleAndroidTest`. APKs are copied back via `docker cp`. Note the instrumented test only compiles under `assembleAndroidTest` — a green `assembleDebug` does **not** mean the test compiles, so always build both locally.
-- **Tests:** UI Automator instrumented tests in `src/androidTest/java/`. The test runner (`run_android.py`) installs the APKs via `adb` and runs the instrumentation suite.
-- **Test content:** Tests should wake the device, dismiss the keyguard, exercise the main inference flow, and assert on results. See `apps/chatapp_android/src/androidTest/java/com/quicinc/chatapp/ChatAppTest.java` for a concrete reference (it also asserts on TTFT / tokens-per-sec performance metrics).
+- **Build:** the generated `build.sh` runs a Docker build (`BUILD_TYPE=build`, which runs `install_build.sh` to install the Android SDK) then `gradle assembleDebug assembleAndroidTest` inside the container; APKs are copied back via `docker cp`. Note the instrumented test only compiles under `assembleAndroidTest` — a green `assembleDebug` does **not** mean the test compiles, so always build both locally.
+- **Tests:** UI Automator instrumented tests in `src/androidTest/java/`. On QDC, `run_android.py` installs the CLI and runs `qai-hub-apps test --app-path`; the Android `launch.sh --test` `adb install`s the debug + androidTest APKs and runs the instrumentation via `am instrument`.
+- **Test content:** Tests should wake the device, dismiss the keyguard, exercise the main inference flow, and assert on results. See `apps/image_classification_android/src/androidTest/java/com/quicinc/imageclassification/ImageClassificationTest.java` for a concrete reference (it also asserts on TTFT / tokens-per-sec performance metrics).
 
 #### Ubuntu Python apps
 
-- **Build:** No build step — Python apps run directly from the fetched source.
-- **Tests:** `test.sh` is executed on the QDC device via `run_linux.sh`.
+- **Build:** the generated `build.sh` is a no-op (prints "Nothing to build") — Python apps run directly from the fetched source.
+- **Tests:** `run_linux.sh` installs the CLI and runs `qai-hub-apps test --app-path` (native), which execs `launch.sh --test` → `test.sh`.
 
 #### Windows apps
 
-- Work in progress.
+- **Build:** Windows C++ apps compile via `build.ps1` (MSBuild for ARM64); Windows Python apps have a no-op build.
+- **Tests:** `run_windows.ps1` installs the CLI and runs `qai-hub-apps test --app-path` in a `hcktest` scheduled task (needed for winget/user-profile access under QDC's SYSTEM context), which execs `launch.ps1 -Test` → `test.ps1`. Native only — Windows ARM64 has no container support.
 
 ### Running tests locally
 
+> [!IMPORTANT]
+> **Regenerate the registry at `--scope test` first.** Test collection is driven by
+> `Registry.load()`, which for an editable install reads the committed
+> `cli/qai_hub_apps/registry.yaml` — that file is **production** scope, so `unpublished`
+> apps are absent from it and *silently generate no test params*: they are not skipped
+> with a message, they simply never appear. The same file is bundled to the device and
+> passed via `--registry`. CI does this regeneration for you
+> (`test-app.yaml`, `install_source == 'source'`); a local run does not.
+>
+> ```bash
+> python -m qai_hub_apps._internal.scripts.generate_registry \
+>   --output_dir cli/qai_hub_apps/ --scope test
+> ```
+>
+> Remember to restore the production-scope file before committing (drop `--scope test`),
+> since the committed registry must stay production scope.
+
 ```bash
-# Full setup (CLI + QDC SDK required)
-bash tools/setup_env.sh --with-cli --with-qdc-sdk
+# Full setup (QDC SDK required for device tests)
+bash tools/setup_env.sh --with-qdc-sdk
 source qaiha-dev/bin/activate
-cd tools/python/qai_hub_apps_test
+
+# Required before device tests — see the note above (from the repo root)
+python -m qai_hub_apps._internal.scripts.generate_registry \
+  --output_dir cli/qai_hub_apps/ --scope test
+
+cd cli/qai_hub_apps/_internal
 
 # Stage 1 only — validate fetch works (no QDC needed)
 pytest -m device_test --model-selection first --test-stage fetch
@@ -374,12 +727,19 @@ pytest -m device_test --model-selection first --test-stage fetch
 # Stages 1 + 2 — fetch + build (Docker required for Android)
 pytest -m device_test --model-selection first --test-stage build
 
-# All stages — full on-device test (QDC token required)
+# All stages — full on-device test (QDC token required). --cli-source defaults to
+# 'source', which builds and bundles a wheel from your branch; use 's3' for the nightly
+# wheel or 'prod' for the PyPI release.
 pytest -m device_test --model-selection first --test-stage all \
   --qdc-token $QDC_API_TOKEN
 
 # Test a specific app
 pytest -m device_test --model-selection first --test-stage fetch \
+  -k image_classification_android
+
+# Save the uploaded test.zip bundle locally
+pytest -m device_test --model-selection first --test-stage all \
+  --qdc-token $QDC_API_TOKEN --save-bundle-dir /tmp/qdc_bundles \
   -k image_classification_android
 ```
 
@@ -408,7 +768,7 @@ mkdir apps/<app_name>_<platform>[_<language>]
 
 Copy from a similar app (e.g. `image_classification_android/info.yaml`). Set:
 - `status: unpublished` until the app is ready (see [App Status](#app-status))
-- `supported_devices` — check `HUB_DEVICE_TO_QDC_DEVICE_MAP` in `tools/python/qai_hub_apps_test/qdc/qdc_jobs.py` for valid device names
+- `supported_devices` — check `HUB_DEVICE_TO_QDC_DEVICE_MAP` in `cli/qai_hub_apps/_internal/qdc/qdc_jobs.py` for valid device names, and mark exactly one entry `Tested` (see [Supported devices](#supported-devices))
 
 ### 3. Add platform-specific files
 
@@ -442,7 +802,7 @@ install_android_sdk
 
 ### 5. Add instrumented tests (Android)
 
-Create `src/androidTest/java/com/quicinc/<app>/<App>Test.java`. See `apps/chatapp_android/src/androidTest/java/com/quicinc/chatapp/ChatAppTest.java` as the reference. Note the test only compiles under `gradle assembleAndroidTest` (not `assembleDebug`). Tests should:
+Create `src/androidTest/java/com/quicinc/<app>/<App>Test.java`. See `apps/image_classification_android/src/androidTest/java/com/quicinc/imageclassification/ImageClassificationTest.java` as the reference. Note the test only compiles under `gradle assembleAndroidTest` (not `assembleDebug`). Tests should:
 - Wake the device and dismiss the keyguard
 - Launch the app via `Intent`
 - Interact with the UI (select image, tap Run)
@@ -452,7 +812,7 @@ Create `src/androidTest/java/com/quicinc/<app>/<App>Test.java`. See `apps/chatap
 
 ```bash
 # Bundler unit tests — validates info.yaml loads, bundling works for all app types
-cd tools/python
+cd cli
 pytest -m bundler_unit -v
 
 # CLI tests — validates registry generation, fetch, and CLI commands
@@ -464,22 +824,40 @@ Both test suites must pass before opening a PR.
 
 ### 7. Regenerate and commit the registry
 
-Adding (or changing) an app means the bundled registry must be regenerated **and committed** — CI fails if `cli/qai_hub_apps/registry.yaml` is out of date. Run (requires `--with-cli` from the dev setup):
+Adding (or changing) an app means the bundled registry must be regenerated **and committed** — CI fails if `cli/qai_hub_apps/registry.yaml` is out of date. Run:
 
 ```bash
-python -m qai_hub_apps_test.scripts.generate_registry --output_dir cli/qai_hub_apps/
+python -m qai_hub_apps._internal.scripts.generate_registry --output_dir cli/qai_hub_apps/
 ```
 
 Then commit the updated `cli/qai_hub_apps/registry.yaml`. When the app is ready to publish, set `status: published` in `info.yaml` and regenerate again.
 
 To inspect the output without touching the bundled file, point `--output_dir` at a scratch path (e.g. `/tmp/reg_test`). To preview the full test set (including unpublished apps), add `--scope test` (see [App Status](#app-status)).
 
-### 8. Run on-device tests locally
+### 8. Generate and commit the app scripts
+
+Every in-scope app needs committed `build.sh` / `build.ps1` **and** `launch.sh` /
+`launch.ps1` — CI's "Check generated files" job regenerates them with `--scope test`
+and fails if any is missing or stale (see [Building Apps](#building-apps) and
+[Running Apps](#running-apps)). Generate for your new app and commit the result:
 
 ```bash
-cd tools/python/qai_hub_apps_test
+python -m qai_hub_apps._internal.scripts.generate_app_scripts --app_id <your_app_id> --scope test
+```
 
-# Full on-device test (requires QDC API token)
+If the generator errors that there's no template for your app's `app_type` /
+`languages`, that combination has no recipe yet — add a template and wire it into
+`_build_plan()` / `_launch_plan()` in `generate_app_scripts.py`. Ubuntu and Windows
+apps also need a hand-written `run.sh` / `run.ps1` (Android apps do not — see
+[Running Apps](#running-apps)).
+
+### 9. Run on-device tests locally
+
+```bash
+cd cli/qai_hub_apps/_internal
+
+# Full on-device test (requires QDC API token). The default --cli-source (source) builds
+# and bundles a wheel from your checkout, so the device runs your branch's CLI.
 pytest -m device_test --model-selection first --test-stage all \
   --qdc-token $QDC_API_TOKEN -vv -s \
   -k <your_app_id>

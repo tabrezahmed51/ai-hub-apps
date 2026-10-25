@@ -4,15 +4,18 @@
 # ---------------------------------------------------------------------
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from qai_hub_models_cli.proto_helpers.release_assets import AssetNotFoundError
 
-from qai_hub_apps.configs.app_yaml import AppLanguage, AppUrl
+from qai_hub_apps.configs.app_yaml import AppLanguage, AppType, AppUrl
+from qai_hub_apps.configs.manifest import MANIFEST_FILENAME, Manifest, ModelProvenance
 from qai_hub_apps.configs.model_asset import ModelAsset
-from qai_hub_apps.conftest import make_app_info
+from qai_hub_apps.conftest import TEST_DEVICE, TEST_DEVICE_2, make_app_info
 from qai_hub_apps.errors import (
     AppIncompatibleError,
     AppNotFoundError,
@@ -26,6 +29,7 @@ from qai_hub_apps.registry.base import (
     Registry,
     _make_app,
 )
+from qai_hub_apps.registry.filters import AppFilter
 from qai_hub_apps.registry.python_app import PythonApp
 
 
@@ -231,7 +235,7 @@ def test_fetch_dev_no_url_missing_bundler_raises(monkeypatch, tmp_path):
 
     info = make_app_info(url=None)
     app = App(info)
-    with pytest.raises(QAIHubAppsError, match="qai_hub_apps_test"):
+    with pytest.raises(QAIHubAppsError, match=r"qai_hub_apps\._internal"):
         app.fetch(tmp_path)
 
 
@@ -541,26 +545,6 @@ def test_fetch_model_file_paths_count_mismatch_raises(monkeypatch, tmp_path):
         app.fetch(tmp_path, model_asset=asset)
 
 
-def test_fetch_model_file_paths_different_dirs_raises(monkeypatch, tmp_path):
-    """AppIncompatibleError when model_file_paths span different parent directories."""
-    monkeypatch.setattr("qai_hub_apps.registry.base.download", fake_download)
-    monkeypatch.setattr("qai_hub_apps.registry.base._is_dev", lambda: False)
-    monkeypatch.setattr(
-        "qai_hub_apps.registry.base.get_asset_url",
-        MagicMock(return_value="https://example.com/model.zip"),
-    )
-
-    info = make_app_info(
-        url=AppUrl(source="https://example.com/app.zip"),
-        related_models=["test_model"],
-        model_file_paths=["models/a.onnx", "assets/b.onnx"],
-    )
-    app = App(info)
-    asset = ModelAsset(model_id="test_model", chipset=None)
-    with pytest.raises(AppIncompatibleError, match="same parent directory"):
-        app.fetch(tmp_path, model_asset=asset)
-
-
 def test_fetch_model_missing_metadata_json_raises(monkeypatch, tmp_path):
     """A model asset without metadata.json raises AppIncompatibleError."""
     no_metadata = _make_fake_download(model_files=["model.onnx"], with_metadata=False)
@@ -578,7 +562,7 @@ def test_fetch_model_missing_metadata_json_raises(monkeypatch, tmp_path):
     )
     app = App(info)
     asset = ModelAsset(model_id="test_model", chipset=None)
-    with pytest.raises(AppIncompatibleError, match="is missing metadata\.json"):
+    with pytest.raises(AppIncompatibleError, match=r"is missing metadata\.json"):
         app.fetch(tmp_path, model_asset=asset)
 
 
@@ -632,9 +616,11 @@ def test_detail_fields_skips_empty_domain():
 
 
 def test_detail_fields_includes_supported_devices():
-    app = App(make_app_info(supported_devices=["Device A", "Device B"]))
+    app = App(make_app_info(supported_devices=[TEST_DEVICE, TEST_DEVICE_2]))
     fields = dict(app.detail_fields())
-    assert fields["Supported Devices"] == "Device A, Device B"
+    assert (
+        fields["Supported Devices"] == "Snapdragon X Elite CRD, Dragonwing IQ-9075 EVK"
+    )
 
 
 def test_registry_apps_returns_all(sample_registry_yaml):
@@ -865,20 +851,10 @@ def test_fetch_app_unsupported_platform_warns(monkeypatch, tmp_path, caplog):
     assert "This app may not be supported on the current device." in caplog.text
 
 
-def test_supported_chipsets_unknown_device_raises_with_issue_url(monkeypatch):
-    monkeypatch.setattr(
-        "qai_hub_apps.registry.base.device_to_chipset",
-        MagicMock(side_effect=KeyError("Bogus")),
-    )
-    app = App(make_app_info(supported_devices=["Bogus"]))
-    with pytest.raises(AppIncompatibleError, match="known AI Hub device"):
-        _ = app.supported_chipsets
-
-
 def test_ensure_chipset_supported_noop_without_devices(monkeypatch):
     # An app with no supported_devices places no restriction on --chipset.
     monkeypatch.setattr(
-        "qai_hub_apps.registry.base.device_to_chipset",
+        "qai_hub_apps.configs.field_types.resolve_chipset",
         MagicMock(side_effect=AssertionError("should not resolve")),
     )
     app = App(make_app_info(supported_devices=[]))
@@ -899,14 +875,15 @@ def test_fetch_unsupported_chipset_raises(monkeypatch, tmp_path):
         MagicMock(return_value="https://example.com/model.zip"),
     )
     monkeypatch.setattr(
-        "qai_hub_apps.registry.base.device_to_chipset", lambda d: "chip-1"
+        "qai_hub_apps.configs.field_types.resolve_chipset",
+        lambda chipsets, devices, device: SimpleNamespace(name="chip-1"),
     )
 
     info = make_app_info(
         url=AppUrl(source="https://example.com/app.zip"),
         related_models=["test_model"],
         model_file_paths=["models/model.onnx"],
-        supported_devices=["Device A"],
+        supported_devices=[TEST_DEVICE],
     )
     app = App(info)
     asset = ModelAsset(model_id="test_model", chipset="chip-2")
@@ -922,14 +899,15 @@ def test_fetch_supported_chipset_succeeds(monkeypatch, tmp_path):
         MagicMock(return_value="https://example.com/model.zip"),
     )
     monkeypatch.setattr(
-        "qai_hub_apps.registry.base.device_to_chipset", lambda d: "chip-1"
+        "qai_hub_apps.configs.field_types.resolve_chipset",
+        lambda chipsets, devices, device: SimpleNamespace(name="chip-1"),
     )
 
     info = make_app_info(
         url=AppUrl(source="https://example.com/app.zip"),
         related_models=["test_model"],
         model_file_dir="models",
-        supported_devices=["Device A"],
+        supported_devices=[TEST_DEVICE],
     )
     app = App(info)
     asset = ModelAsset(model_id="test_model", chipset="chip-1")
@@ -949,11 +927,247 @@ def test_fetch_unsupported_device_raises(monkeypatch, tmp_path):
         url=AppUrl(source="https://example.com/app.zip"),
         related_models=["test_model"],
         model_file_paths=["models/model.onnx"],
-        supported_devices=["Device A"],
+        supported_devices=[TEST_DEVICE],
     )
     app = App(info)
-    asset = ModelAsset(model_id="test_model", device="Device B")
+    asset = ModelAsset(model_id="test_model", device="Dragonwing IQ-9075 EVK")
     with pytest.raises(
-        AppIncompatibleError, match="Device 'Device B' is not supported"
+        AppIncompatibleError, match="Device 'Dragonwing IQ-9075 EVK' is not supported"
     ):
         app.fetch(tmp_path, model_asset=asset)
+
+
+@pytest.fixture
+def confirm_switch(monkeypatch) -> MagicMock:
+    """Approve switch_model's replace prompt."""
+    confirm = MagicMock(return_value=True)
+    monkeypatch.setattr("qai_hub_apps.registry.base.confirm", confirm)
+    return confirm
+
+
+def test_bundles_matches_recorded_request(monkeypatch, tmp_path):
+    monkeypatch.setattr("qai_hub_apps.registry.base.download", fake_download)
+    monkeypatch.setattr(
+        "qai_hub_apps.registry.base.get_asset_url",
+        MagicMock(return_value="https://example.com/model.zip"),
+    )
+    info = make_app_info(
+        url=AppUrl(source="https://example.com/app.zip"),
+        related_models=["test_model"],
+        model_file_paths=[],
+        model_file_dir="models",
+    )
+    asset = ModelAsset(model_id="test_model")
+    app = App(info)
+    app_dir = app.fetch(tmp_path / "out", model_asset=asset)
+
+    assert app.bundles(app_dir, asset) is True
+    assert app.bundles(app_dir, ModelAsset(model_id="other")) is False
+    # onnx is not AOT-compiled, so the target does not select the asset.
+    assert app.bundles(app_dir, ModelAsset(model_id="test_model", device="X")) is True
+    # Nothing recorded at all does not count as bundling the requested model.
+    assert app.bundles(tmp_path / "missing", asset) is False
+
+
+def test_bundles_compares_resolved_chipset_for_aot_runtime(monkeypatch, tmp_path):
+    """An AOT runtime's assets are chipset-specific, however the target was named."""
+    monkeypatch.setattr(
+        "qai_hub_apps.configs.model_asset.device_to_chipset", lambda d: f"chip-of-{d}"
+    )
+    app = App(make_app_info(runtime="precompiled_qnn_onnx"))
+    app_dir = tmp_path / "test_app"
+    app_dir.mkdir()
+    Manifest(
+        model=ModelProvenance(
+            model_id="test_model",
+            requested=ModelAsset(model_id="test_model", chipset="chip-of-Device A"),
+        )
+    ).write(app_dir)
+
+    same = ModelAsset(model_id="test_model", device="Device A")
+    assert app.bundles(app_dir, same) is True
+    other = ModelAsset(model_id="test_model", device="Device B")
+    assert app.bundles(app_dir, other) is False
+    # Neither side names a target, so there is nothing to disagree about.
+    Manifest(
+        model=ModelProvenance(
+            model_id="test_model", requested=ModelAsset(model_id="test_model")
+        )
+    ).write(app_dir)
+    assert app.bundles(app_dir, ModelAsset(model_id="test_model")) is True
+
+
+def test_switch_model_noop_when_app_absent(tmp_path):
+    app = App(make_app_info(related_models=["test_model"]))
+    assert app.switch_model(tmp_path / "missing", ModelAsset(model_id="m")) is False
+
+
+def test_switch_model_noop_when_already_bundled(monkeypatch, tmp_path):
+    app = App(make_app_info(related_models=["test_model"]))
+    app_dir = tmp_path / "test_app"
+    app_dir.mkdir()
+    monkeypatch.setattr(App, "bundles", MagicMock(return_value=True))
+    assert app.switch_model(app_dir, ModelAsset(model_id="test_model")) is False
+
+
+def test_switch_model_declined_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "qai_hub_apps.registry.base.confirm", MagicMock(return_value=False)
+    )
+    info = make_app_info(
+        related_models=["test_model"],
+        model_file_paths=[],
+        model_file_dir="models",
+    )
+    app_dir = tmp_path / "test_app"
+    app_dir.mkdir()
+    Manifest(
+        model=ModelProvenance(model_id="old_model", files=["models/old.onnx"])
+    ).write(app_dir)
+
+    with pytest.raises(InvalidArgumentError, match=r"declined.*\(old_model\)"):
+        App(info).switch_model(app_dir, ModelAsset(model_id="test_model"))
+
+
+def test_switch_model_replaces_bundled_model(monkeypatch, tmp_path, confirm_switch):
+    monkeypatch.setattr("qai_hub_apps.registry.base.download", fake_download)
+    monkeypatch.setattr(
+        "qai_hub_apps.registry.base.get_asset_url",
+        MagicMock(return_value="https://example.com/model.zip"),
+    )
+
+    info = make_app_info(
+        related_models=["test_model"],
+        model_file_paths=[],
+        model_file_dir="models",
+    )
+    app = App(info)
+    app_dir = tmp_path / "test_app"
+    (app_dir / "models").mkdir(parents=True)
+    (app_dir / "models" / "stale.onnx").touch()
+
+    assert app.switch_model(app_dir, ModelAsset(model_id="test_model")) is True
+
+    confirm_switch.assert_called_once()
+    assert (app_dir / "models" / "model1.onnx").exists()
+    assert (app_dir / "models" / "metadata.json").exists()
+    # Unrecorded files predate the manifest, so they are left alone.
+    assert (app_dir / "models" / "stale.onnx").exists()
+
+
+def test_switch_model_removes_previous_model_files(
+    monkeypatch, tmp_path, confirm_switch
+):
+    """Files placed by an earlier model - listed or not - do not survive a switch."""
+    monkeypatch.setattr("qai_hub_apps.registry.base._is_dev", lambda: False)
+    monkeypatch.setattr(
+        "qai_hub_apps.registry.base.get_asset_url",
+        MagicMock(return_value="https://example.com/model.zip"),
+    )
+    monkeypatch.setattr(
+        "qai_hub_apps.registry.base.download",
+        _make_fake_download(model_files=["a.onnx"], extra_files=["a.onnx.data"]),
+    )
+
+    info = make_app_info(
+        url=AppUrl(source="https://example.com/app.zip"),
+        related_models=["test_model", "other_model"],
+        model_file_paths=["models/m.onnx"],
+    )
+    app = App(info)
+    app_dir = app.fetch(tmp_path / "out", model_asset=ModelAsset(model_id="test_model"))
+    assert (app_dir / "models" / "a.onnx.data").exists()
+    app_file = app_dir / "models" / "app_owned.txt"
+    app_file.touch()
+
+    monkeypatch.setattr(
+        "qai_hub_apps.registry.base.download",
+        _make_fake_download(
+            model_files=["b.onnx"], extra_files=["b.onnx.data"], model_id="other_model"
+        ),
+    )
+    # A different model, so the switch is not a no-op.
+    app.switch_model(app_dir, ModelAsset(model_id="other_model"))
+
+    assert (app_dir / "models" / "m.onnx").exists()
+    assert (app_dir / "models" / "b.onnx.data").exists()
+    # The previous model's unlisted sidecar is gone; app-owned files are kept.
+    assert not (app_dir / "models" / "a.onnx.data").exists()
+    assert app_file.exists()
+
+
+def test_switch_model_removes_previous_model_directory(
+    monkeypatch, tmp_path, confirm_switch
+):
+    """A recorded entry that is a directory is removed wholesale."""
+    monkeypatch.setattr("qai_hub_apps.registry.base.download", fake_download)
+    monkeypatch.setattr(
+        "qai_hub_apps.registry.base.get_asset_url",
+        MagicMock(return_value="https://example.com/model.zip"),
+    )
+
+    info = make_app_info(
+        related_models=["test_model"],
+        model_file_paths=[],
+        model_file_dir="models",
+    )
+    app = App(info)
+    app_dir = tmp_path / "test_app"
+    (app_dir / "models" / "model1.onnx").mkdir(parents=True)
+    (app_dir / "models" / "model1.onnx" / "weights.bin").touch()
+    Manifest(
+        model=ModelProvenance(model_id="test_model", files=["models/model1.onnx"])
+    ).write(app_dir)
+
+    app.switch_model(app_dir, ModelAsset(model_id="test_model"))
+
+    assert (app_dir / "models" / "model1.onnx").is_file()
+
+
+def test_switch_model_ignores_unreadable_manifest(
+    monkeypatch, tmp_path, confirm_switch
+):
+    """A corrupt manifest is rewritten rather than failing the switch."""
+    monkeypatch.setattr("qai_hub_apps.registry.base.download", fake_download)
+    monkeypatch.setattr(
+        "qai_hub_apps.registry.base.get_asset_url",
+        MagicMock(return_value="https://example.com/model.zip"),
+    )
+
+    info = make_app_info(
+        related_models=["test_model"],
+        model_file_paths=[],
+        model_file_dir="models",
+    )
+    app = App(info)
+    app_dir = tmp_path / "test_app"
+    (app_dir / "models").mkdir(parents=True)
+    (app_dir / MANIFEST_FILENAME).write_text("{not json")
+
+    app.switch_model(app_dir, ModelAsset(model_id="test_model"))
+
+    manifest = json.loads((app_dir / MANIFEST_FILENAME).read_text())
+    assert sorted(manifest["model"]["files"]) == [
+        "models/LICENSE",
+        "models/metadata.json",
+        "models/model1.onnx",
+        "models/model2.onnx",
+    ]
+
+
+def test_filter_returns_all_apps_for_empty_filter(sample_registry_yaml):
+    registry = Registry.load(sample_registry_yaml)
+    assert [app.id for app in registry.filter(AppFilter())] == ["test_app"]
+
+
+def test_filter_returns_only_matching_apps(sample_registry_yaml):
+    registry = Registry.load(sample_registry_yaml)
+    assert registry.filter(AppFilter(app_types=frozenset({AppType.WINDOWS}))) == []
+
+
+def test_filter_preserves_registry_order(sample_registry_yaml, tmp_path):
+    text = sample_registry_yaml.read_text()
+    two_apps = tmp_path / "two.yaml"
+    two_apps.write_text(text + text.split("apps:\n")[1].replace("test_app", "z_app"))
+    registry = Registry.load(two_apps)
+    assert [app.id for app in registry.filter(AppFilter())] == ["test_app", "z_app"]
