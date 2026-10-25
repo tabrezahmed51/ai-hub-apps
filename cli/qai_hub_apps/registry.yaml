@@ -1,54 +1,51 @@
 schema_version: '1.2'
 min_cli_version: 0.30.1
 apps:
-- name: LLM Chat Android
-  id: chatapp_android
-  status: deprecated
-  headline: Run an LLM on Android
-  description: A sample Android chat app showcasing how to integrate an on-device LLM with Qualcomm® Gen AI Inference Extensions (Genie) APIs, optimized for Snapdragon® NPU acceleration.
-  domain: Generative AI
-  use_case: Text Generation
-  app_repo_url: https://github.com/qualcomm/ai-hub-apps/tree/main/apps/chatapp_android
-  app_type: android
+- name: EasyOCR Text Recognition
+  id: easyocr_ubuntu_py
+  status: published
+  headline: On-device optical character recognition with TFLite
+  description: A sample app for Ubuntu integrating EasyOCR, a two-stage text detector (CRAFT) plus text recognizer (CTC), run via TFLite Runtime. It uses GStreamer for input video/images and provides a minimal web interface to stream output frames with recognized text overlaid, suitable for embedded applications.
+  domain: Computer Vision
+  use_case: Image To Text
+  app_repo_url: https://github.com/qualcomm/ai-hub-apps/tree/main/apps/easyocr_ubuntu_py
+  app_type: ubuntu
   runtime:
-  - genie
+  - tflite
   related_models:
-  - qwen3_4b_instruct_2507
-  - llama_v3_2_3b_instruct
+  - easyocr
   precisions:
-  - w4a16
+  - w8a8
   languages:
-  - Java
-  - C++
+  - Python
   supported_devices:
-  - Snapdragon 8 Elite QRD
-  model_file_dir: src/main/assets/models/llm
-  deprecation_notice: LLM Chat Android is deprecated in favour of the GenieX Chat Android app (geniex_chat_android), which runs LLMs and VLMs on-device via the Qualcomm® GenieX SDK.
-- name: LLM Chat Windows
-  id: chatapp_windows_cpp
-  status: deprecated
-  headline: Deploy and run LLMs via CLI
-  description: A sample CLI app demonstrating how to integrate an on-device LLM with Qualcomm® Gen AI Inference Extensions (Genie) APIs, optimized for Snapdragon® NPU acceleration.
-  domain: Generative AI
-  use_case: Text Generation
-  app_repo_url: https://github.com/qualcomm/ai-hub-apps/tree/main/apps/chatapp_windows_cpp
-  app_type: windows
+  - Arduino VENTUNO Q
+  - Dragonwing IQ-9075 EVK
+  model_file_paths:
+  - models/easyocr_detector.tflite
+  - models/easyocr_recognizer.tflite
+- name: Face Recognition
+  id: face_recognition_ubuntu_py
+  status: published
+  headline: On-device live face recognition with TFLite
+  description: A sample app for Ubuntu that performs on-device face recognition with any face-embedding model via TFLite Runtime (CavaFace is the default supported model). Identities are enrolled from a directory of face images; a live camera stream is then processed frame-by-frame to detect faces, embed each one on-device, and draw a labeled bounding box naming the matched person (or "Unknown"). It leverages GStreamer for camera input and a minimal web interface to stream the annotated frames, suitable for embedded applications.
+  domain: Computer Vision
+  use_case: Face Recognition
+  app_repo_url: https://github.com/qualcomm/ai-hub-apps/tree/main/apps/face_recognition_ubuntu_py
+  app_type: ubuntu
   runtime:
-  - genie
+  - tflite
   related_models:
-  - qwen3_4b_instruct_2507
-  - llama_v3_8b_instruct
-  - llama_v3_1_8b_instruct
-  - llama_v3_2_3b_instruct
-  - llama_v3_taide_8b_chat
+  - cavaface
   precisions:
-  - w4a16
+  - float
   languages:
-  - C++
+  - Python
   supported_devices:
-  - Snapdragon X Elite CRD
-  model_file_dir: genie_bundle
-  deprecation_notice: LLM Chat Windows is deprecated in favour of the GenieX Chat Windows (geniex_chat_windows), which runs LLMs and VLMs on-device via the Qualcomm® GenieX SDK.
+  - Arduino VENTUNO Q
+  - Dragonwing IQ-9075 EVK
+  model_file_paths:
+  - models/cavaface.tflite
 - name: GenieX Chat Android
   id: geniex_chat_android
   status: published
@@ -81,8 +78,8 @@ apps:
   - Kotlin
   - Java
   supported_devices:
-  - Snapdragon 8 Elite QRD
-  - Snapdragon 8 Elite Gen 5 QRD
+  - Samsung Galaxy S25
+  - Samsung Galaxy S26
   disable_cli_model_fetch: true
 - name: Image Classification Android
   id: image_classification_android
@@ -120,7 +117,7 @@ apps:
   languages:
   - Java
   supported_devices:
-  - Snapdragon 8 Elite QRD
+  - Samsung Galaxy S25
   model_file_paths:
   - src/main/assets/classifier.tflite
 - name: Image Classification Windows
@@ -162,6 +159,28 @@ apps:
   - Snapdragon X Elite CRD
   model_file_paths:
   - assets/models/classification.onnx
+- name: LiDAR Semantic Segmentation
+  id: lidar_segmentation_ubuntu_py
+  status: published
+  headline: On-device LiDAR point cloud semantic segmentation with TFLite
+  description: A sample app for Ubuntu demonstrating semantic segmentation of LiDAR point clouds via TFLite Runtime. It projects a scan into a range image, classifies every point on-device, and renders a color-coded bird's-eye view and range image to a minimal web interface or an image file, suitable for embedded applications.
+  domain: Computer Vision
+  use_case: Semantic Segmentation
+  app_repo_url: https://github.com/qualcomm/ai-hub-apps/tree/main/apps/lidar_segmentation_ubuntu_py
+  app_type: ubuntu
+  runtime:
+  - tflite
+  related_models:
+  - salsanext
+  precisions:
+  - float
+  languages:
+  - Python
+  supported_devices:
+  - Arduino VENTUNO Q
+  - Dragonwing IQ-9075 EVK
+  model_file_paths:
+  - models/salsanext.tflite
 - name: MediaPipe Hand Gesture Recognition
   id: mediapipe_hand_gesture_ubuntu_py
   status: published
@@ -180,11 +199,35 @@ apps:
   languages:
   - Python
   supported_devices:
+  - Arduino VENTUNO Q
   - Dragonwing IQ-9075 EVK
   model_file_paths:
   - models/palm_detector.tflite
   - models/hand_landmark_detector.tflite
   - models/canned_gesture_classifier.tflite
+- name: 3D Object Detection
+  id: object_detection_3d_ubuntu_py
+  status: published
+  headline: On-device 3D object detection with TFLite
+  description: A sample app for Ubuntu integrating the 3D-Deep-BOX model via TFLite Runtime. A 2D detector locates objects in each frame and a second network estimates their 3D orientation and dimensions, which are solved into oriented 3D boxes and drawn on the frame. It uses GStreamer for input video and provides a minimal web interface to stream output frames suitable for embedded applications.
+  domain: Computer Vision
+  use_case: Object Detection
+  app_repo_url: https://github.com/qualcomm/ai-hub-apps/tree/main/apps/object_detection_3d_ubuntu_py
+  app_type: ubuntu
+  runtime:
+  - tflite
+  related_models:
+  - deepbox
+  precisions:
+  - float
+  languages:
+  - Python
+  supported_devices:
+  - Arduino VENTUNO Q
+  - Dragonwing IQ-9075 EVK
+  model_file_paths:
+  - models/yolo_2d_detection.tflite
+  - models/vgg_3d_detection.tflite
 - name: Object Detection Android
   id: object_detection_android
   status: published
@@ -210,7 +253,7 @@ apps:
   languages:
   - Java
   supported_devices:
-  - Snapdragon 8 Elite QRD
+  - Samsung Galaxy S25
   model_file_paths:
   - src/main/assets/detector.tflite
 - name: Object Detection Windows
@@ -242,6 +285,28 @@ apps:
   - Snapdragon X2 Elite CRD
   model_file_paths:
   - assets/models/detection.onnx
+- name: Portrait Segmentation
+  id: portrait_segmentation_ubuntu_py
+  status: published
+  headline: On-device portrait segmentation with TFLite
+  description: A sample app for Ubuntu integrating the SINet portrait-segmentation model via TFLite Runtime. It uses GStreamer for input video and provides a minimal web interface to stream output frames suitable for embedded applications.
+  domain: Computer Vision
+  use_case: Semantic Segmentation
+  app_repo_url: https://github.com/qualcomm/ai-hub-apps/tree/main/apps/portrait_segmentation_ubuntu_py
+  app_type: ubuntu
+  runtime:
+  - tflite
+  related_models:
+  - sinet
+  precisions:
+  - float
+  languages:
+  - Python
+  supported_devices:
+  - Arduino VENTUNO Q
+  - Dragonwing IQ-9075 EVK
+  model_file_paths:
+  - models/sinet.tflite
 - name: Posenet Pose Estimation
   id: posenet_ubuntu_py
   status: published
@@ -260,6 +325,7 @@ apps:
   languages:
   - Python
   supported_devices:
+  - Arduino VENTUNO Q
   - Dragonwing IQ-9075 EVK
   model_file_paths:
   - models/posenet_mobilenet.tflite
@@ -309,9 +375,33 @@ apps:
   languages:
   - Java
   supported_devices:
-  - Snapdragon 8 Elite QRD
+  - Samsung Galaxy S25
   model_file_paths:
   - src/main/assets/segmenter.tflite
+- name: Semantic Segmentation Ubuntu
+  id: semantic_segmentation_ubuntu_py
+  status: published
+  headline: On-device semantic segmentation with TFLite
+  description: A sample app for Ubuntu demonstrating semantic segmentation on a live camera stream via TFLite Runtime. It uses GStreamer for input video and provides a minimal web interface to stream the color-overlaid output frames, suitable for embedded applications.
+  domain: Computer Vision
+  use_case: Semantic Segmentation
+  app_repo_url: https://github.com/qualcomm/ai-hub-apps/tree/main/apps/semantic_segmentation_ubuntu_py
+  app_type: ubuntu
+  runtime:
+  - tflite
+  related_models:
+  - deeplab_xception
+  - deeplabv3_plus_mobilenet
+  - fcn_resnet50
+  precisions:
+  - w8a8
+  languages:
+  - Python
+  supported_devices:
+  - Arduino VENTUNO Q
+  - Dragonwing IQ-9075 EVK
+  model_file_paths:
+  - models/deeplab_xception.tflite
 - name: Stable Diffusion Windows
   id: stable_diffusion_windows_py
   status: published
@@ -354,7 +444,7 @@ apps:
   languages:
   - Java
   supported_devices:
-  - Snapdragon 8 Elite QRD
+  - Samsung Galaxy S25
   model_file_paths:
   - src/main/assets/superres.tflite
 - name: Super Resolution Windows
@@ -419,6 +509,7 @@ apps:
   languages:
   - Python
   supported_devices:
+  - Arduino VENTUNO Q
   - Dragonwing IQ-9075 EVK
   model_file_paths:
   - models/yamnet.tflite

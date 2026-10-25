@@ -12,7 +12,7 @@ headline: 'Upscale images efficiently with TFLite'
 description: 'A sample Android app that creates upscaled images, demonstrating best practices for TFLite model inference with a simple and interactive workflow.'
 precisions: [float]
 app_type: 'android'
-base_docker: ubuntu.dockerfile
+base_docker: android.dockerfile
 static_img_filename: 'app_screen.png'
 app_repo_relative_path: 'super_resolution_android'
 os:
@@ -21,4 +21,6 @@ os:
 languages: ['Java']
 use_case: 'Super Resolution'
 related_models: ['xlsr']
-supported_devices: ["Snapdragon 8 Elite QRD"]
+supported_devices:
+  - name: "Samsung Galaxy S25"
+    status: "Tested"

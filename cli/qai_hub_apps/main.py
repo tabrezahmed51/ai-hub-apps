@@ -7,7 +7,9 @@ import logging
 import sys
 from pathlib import Path
 
-from qai_hub_apps import __version__, _is_dev
+from qai_hub_models_cli.args import flatten_multi_arg
+
+from qai_hub_apps import PACKAGE_NAME, __version__, _is_dev
 from qai_hub_apps.commands.fetch import run_fetch
 from qai_hub_apps.commands.list_apps import run_info, run_list
 from qai_hub_apps.configs.model_asset import ModelAsset
@@ -16,13 +18,22 @@ from qai_hub_apps.errors import (
     QAIHubAppsError,
     RegistryNotFoundError,
 )
-from qai_hub_apps.experimental import add_experimental_parser
+from qai_hub_apps.experimental import add_experimental_parser, is_enabled
 from qai_hub_apps.experimental.commands.build import run_build
+from qai_hub_apps.experimental.commands.configure import run_configure
+from qai_hub_apps.experimental.commands.run import run_run
 from qai_hub_apps.logging_utils import configure_logging
-from qai_hub_apps.registry import Registry
+from qai_hub_apps.registry import AppFilter, Registry, build_app_filter
+from qai_hub_apps.user_config import get_configured_device
+from qai_hub_apps.utils.devices import resolve_device_info
+from qai_hub_apps.utils.scripts import set_non_interactive
 from qai_hub_apps.utils.updates import check_for_update
 
 logger = logging.getLogger(__name__)
+
+#: Value ``list --device`` takes when passed with no argument: use the device
+#: from ``qai-hub-apps configure``. No real device is named this.
+USE_CONFIGURED_DEVICE = "<configured>"
 
 
 def _resolve_model_asset(
@@ -57,6 +68,52 @@ def _resolve_model_asset(
     return ModelAsset(model_id=model, chipset=chipset, device=device)
 
 
+def _resolve_list_device(device: str | None) -> str | None:
+    """Resolve ``list --device [DEVICE]`` to a canonical AI Hub device name.
+
+    Parameters
+    ----------
+    device
+        The raw flag value, or ``USE_CONFIGURED_DEVICE`` when it was passed
+        without one.
+
+    Returns
+    -------
+    str | None
+        The device name to filter on, or None when the flag was not passed.
+
+    Raises
+    ------
+    InvalidArgumentError
+        If no device is configured, or *device* is not a known AI Hub device.
+    """
+    if device is None:
+        return None
+    if device != USE_CONFIGURED_DEVICE:
+        return resolve_device_info(device).name
+    configured = get_configured_device()
+    if configured is None:
+        raise InvalidArgumentError(
+            "No target device configured. Run 'qai-hub-apps configure' to set "
+            "one, or pass '--device NAME'."
+        )
+    return configured.name
+
+
+def _resolve_app_filter(args: argparse.Namespace) -> AppFilter:
+    """Build the ``list`` command's filter from parsed args."""
+    return build_app_filter(
+        app_type=flatten_multi_arg(args.app_type),
+        language=flatten_multi_arg(args.language),
+        runtime=flatten_multi_arg(args.runtime),
+        domain=flatten_multi_arg(args.domain),
+        use_case=flatten_multi_arg(args.use_case),
+        precision=flatten_multi_arg(args.precision),
+        model=flatten_multi_arg(args.model),
+        device=_resolve_list_device(args.device),
+    )
+
+
 def _resolve_app_target(
     app: str | None,
     app_id: str | None,
@@ -85,15 +142,24 @@ def _resolve_app_target(
     return app, None
 
 
+def _split_passthrough(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Split argv at the first ``--``; the tail is passed through to the run target."""
+    if "--" in argv:
+        sep = argv.index("--")
+        return argv[:sep], argv[sep + 1 :]
+    return argv, []
+
+
 def main() -> None:
     epilog = (
         "Examples:\n"
         "  qai-hub-apps list                   List all available apps\n"
+        "  qai-hub-apps list --type android    List only the Android apps\n"
         "  qai-hub-apps info <app_id>          Show details for an app\n"
         "  qai-hub-apps fetch <app_id>         Download an app's source\n"
     )
     parser = argparse.ArgumentParser(
-        prog="qai-hub-apps",
+        prog=PACKAGE_NAME,
         description="CLI for browsing and downloading Qualcomm® AI Hub Apps.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=epilog,
@@ -139,21 +205,76 @@ def main() -> None:
             else argparse.SUPPRESS,
         )
 
+    def add_list_filter_args(p: argparse.ArgumentParser) -> None:
+        """Add the filter flags to the ``list`` command."""
+
+        def add_filter(
+            flag: str,
+            metavar: str,
+            subject: str,
+            known: str,
+            dest: str | None = None,
+        ) -> None:
+            p.add_argument(
+                flag,
+                dest=dest,
+                nargs="+",
+                action="append",
+                default=None,
+                metavar=metavar,
+                help=f"Filter by {subject}; an app matches any of the given "
+                f"values. May be repeated or given multiple values. {known}",
+            )
+
+        add_filter(
+            "--type",
+            "TYPE",
+            "app type",
+            "Values: android, windows, ubuntu",
+            dest="app_type",
+        )
+        add_filter(
+            "--language",
+            "LANGUAGE",
+            "implementation language",
+            "Values: Python, C++ (or cpp), Java, Kotlin, Go",
+        )
+        add_filter(
+            "--runtime", "RUNTIME", "inference runtime", "e.g. tflite, onnx, genie"
+        )
+        add_filter("--domain", "DOMAIN", "domain", "e.g. Audio, Computer Vision")
+        add_filter("--use-case", "USE_CASE", "use case", "e.g. Object Detection")
+        add_filter("--precision", "PRECISION", "model precision", "e.g. float, w8a8")
+        add_filter(
+            "--model",
+            "MODEL",
+            "a model the app supports (substring match)",
+            "e.g. whisper, llama",
+        )
+        # --device leans on the experimental 'configure' command for its
+        # no-value form, so it is gated while that command is.
+        if not is_enabled():
+            p.set_defaults(device=None)
+            return
+        p.add_argument(
+            "--device",
+            dest="device",
+            nargs="?",
+            default=None,
+            const=USE_CONFIGURED_DEVICE,
+            metavar="DEVICE",
+            help="Filter to apps supporting an AI Hub device. With no value, "
+            "uses the device set by 'qai-hub-apps configure'",
+        )
+
     def add_app_id_arg(p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "app_id",
             help="App ID (from 'qai-hub-apps list')",
         )
 
-    def add_fetch_args(p: argparse.ArgumentParser) -> None:
-        p.add_argument(
-            "-o",
-            "--output-dir",
-            dest="output_dir",
-            type=Path,
-            default=Path.cwd(),
-            help="Output directory (default: current directory)",
-        )
+    def add_model_args(p: argparse.ArgumentParser) -> None:
+        """Add the model-selection and download-target flags."""
         model_group = p.add_mutually_exclusive_group()
         model_group.add_argument(
             "--model",
@@ -194,6 +315,17 @@ def main() -> None:
             metavar="DEVICE",
             help="Device to target when downloading model (must be supported by the app)",
         )
+
+    def add_fetch_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "-o",
+            "--output-dir",
+            dest="output_dir",
+            type=Path,
+            default=Path.cwd(),
+            help="Output directory (default: current directory)",
+        )
+        add_model_args(p)
         p.add_argument(
             "--overwrite",
             dest="overwrite",
@@ -201,9 +333,66 @@ def main() -> None:
             help="Overwrite the app in place if it already exists in the output "
             "directory (default: save a separate numbered copy)",
         )
+        p.add_argument(
+            "-y",
+            "--yes",
+            dest="assume_yes",
+            action="store_true",
+            help="Assume yes for all prompts, including the app scripts' install "
+            "prompts (installs system packages and SDKs without asking)",
+        )
 
-    list_parser = subparsers.add_parser("list", help="List available apps")
+    def add_app_action_args(p: argparse.ArgumentParser, verb: str) -> None:
+        """Add the shared app-target + fetch + docker/clean args to build/run."""
+        add_registry_arg(p)
+        app_group = p.add_mutually_exclusive_group()
+        app_group.add_argument(
+            "app",
+            nargs="?",
+            default=None,
+            metavar="APP_ID_OR_PATH",
+            help=f"App to {verb}: an app ID to fetch-and-{verb} (from "
+            "'qai-hub-apps list'), or a path to an already-fetched app directory. "
+            "Use --app-id or --app-path to be explicit",
+        )
+        app_group.add_argument(
+            "--app-id",
+            dest="app_id",
+            default=None,
+            metavar="APP_ID",
+            help=f"App ID to {verb} (from 'qai-hub-apps list'); fetched first if "
+            "needed",
+        )
+        app_group.add_argument(
+            "--app-path",
+            dest="app_path",
+            default=None,
+            type=Path,
+            metavar="PATH",
+            help=f"Path to an already-fetched app directory to {verb} in place",
+        )
+        add_fetch_args(p)
+        p.add_argument(
+            "--no-docker",
+            dest="no_docker",
+            action="store_true",
+            help=f"{verb.capitalize()} natively on the host instead of using Docker",
+        )
+        p.add_argument(
+            "--clean",
+            dest="clean",
+            action="store_true",
+            help="Cleanup prior build artifacts before building",
+        )
+
+    list_parser = subparsers.add_parser(
+        "list",
+        help="List available apps",
+        description="List available apps. Filter flags are ANDed, values within "
+        "one flag are ORed, and matching is case-insensitive.",
+    )
     add_registry_arg(list_parser)
+    add_list_filter_args(list_parser)
 
     info_parser = subparsers.add_parser("info", help="Show details for an app")
     add_registry_arg(info_parser)
@@ -217,66 +406,77 @@ def main() -> None:
     add_fetch_args(fetch_parser)
 
     build_parser = add_experimental_parser(subparsers, "build", help="Build an app")
-    add_registry_arg(build_parser)
-    app_group = build_parser.add_mutually_exclusive_group()
-    app_group.add_argument(
-        "app",
-        nargs="?",
-        default=None,
-        metavar="APP_ID_OR_PATH",
-        help="App to build: an app ID to fetch-and-build (from 'qai-hub-apps list'), "
-        "or a path to an already-fetched app directory. "
-        "Use --app-id or --app-path to be explicit",
+    add_app_action_args(build_parser, "build")
+
+    run_parser = add_experimental_parser(subparsers, "run", help="Run an app")
+    add_app_action_args(run_parser, "run")
+
+    test_parser = add_experimental_parser(
+        subparsers, "test", help="Run an app's on-device test"
     )
-    app_group.add_argument(
-        "--app-id",
-        dest="app_id",
-        default=None,
-        metavar="APP_ID",
-        help="App ID to build (from 'qai-hub-apps list'); fetched first if needed",
+    add_app_action_args(test_parser, "test")
+
+    configure_parser = add_experimental_parser(
+        subparsers, "configure", help="Configure the target device"
     )
-    app_group.add_argument(
-        "--app-path",
-        dest="app_path",
+    configure_parser.add_argument(
+        "--device",
+        dest="device",
         default=None,
-        type=Path,
-        metavar="PATH",
-        help="Path to an already-fetched app directory to build in place",
+        metavar="DEVICE",
+        help="Device name to set as the target (default: prompt to pick one)",
     )
-    add_fetch_args(build_parser)
-    build_parser.add_argument(
-        "--no-docker",
-        dest="no_docker",
+    configure_parser.add_argument(
+        "--show",
+        dest="show",
         action="store_true",
-        help="Build natively on the host instead of using Docker",
-    )
-    build_parser.add_argument(
-        "--clean",
-        dest="clean",
-        action="store_true",
-        help="Cleanup prior build artifacts before building",
+        help="Show the currently configured device and exit",
     )
 
-    args = parser.parse_args()
+    argv, app_args = _split_passthrough(sys.argv[1:])
+    args = parser.parse_args(argv)
 
     configure_logging(args.log_level)
 
-    if args.command in ("fetch", "build") and (args.chipset or args.device):
-        cmd_parser = fetch_parser if args.command == "fetch" else build_parser
+    if getattr(args, "assume_yes", False):
+        set_non_interactive()
+
+    if args.command in ("fetch", "build", "run", "test") and (
+        args.chipset or args.device
+    ):
+        cmd_parser = {
+            "fetch": fetch_parser,
+            "build": build_parser,
+            "run": run_parser,
+            "test": test_parser,
+        }[args.command]
         flag = "--chipset" if args.chipset else "--device"
         if args.model_path is not None:
             cmd_parser.error(f"{flag} cannot be used with --model-path")
         if args.model is None and args.model_id is None:
             cmd_parser.error(f"{flag} requires --model or --model-id")
+        if args.command in ("run", "test") and args.chipset:
+            cmd_parser.error("--chipset cannot be used with run/test; pass --device.")
 
-    if args.command == "build" and (
+    if args.command in ("build", "run", "test") and (
         args.app is None and args.app_id is None and args.app_path is None
     ):
-        build_parser.error("one of APP_ID_OR_PATH, --app-id or --app-path is required")
+        cmd_parser = {"build": build_parser, "run": run_parser, "test": test_parser}[
+            args.command
+        ]
+        cmd_parser.error("one of APP_ID_OR_PATH, --app-id or --app-path is required")
 
     registry_path = getattr(args, "registry", None)
 
-    if args.command not in ("list", "info", "fetch", "build"):
+    if args.command not in (
+        "list",
+        "info",
+        "fetch",
+        "build",
+        "run",
+        "test",
+        "configure",
+    ):
         parser.print_help()
         return
 
@@ -287,7 +487,7 @@ def main() -> None:
         registry = Registry.load(registry_path)
 
         if args.command == "list":
-            run_list(registry)
+            run_list(registry, _resolve_app_filter(args))
         elif args.command == "info":
             run_info(args.app_id, registry)
         elif args.command == "fetch":
@@ -318,6 +518,27 @@ def main() -> None:
                 clean=args.clean,
                 overwrite=args.overwrite,
             )
+        elif args.command in ("run", "test"):
+            model_asset = _resolve_model_asset(
+                args.model, args.model_id, args.model_path, args.chipset, args.device
+            )
+            app_id, app_path = _resolve_app_target(
+                args.app, args.app_id, args.app_path, args.overwrite
+            )
+            run_run(
+                app_id,
+                app_path,
+                args.output_dir,
+                registry,
+                model_asset,
+                use_docker=not args.no_docker,
+                clean=args.clean,
+                overwrite=args.overwrite,
+                app_args=app_args,
+                test=args.command == "test",
+            )
+        elif args.command == "configure":
+            run_configure(args.device, show=args.show)
     except QAIHubAppsError as e:
         logger.error(str(e))  # noqa: TRY400
         sys.exit(1)

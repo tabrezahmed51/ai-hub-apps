@@ -11,6 +11,7 @@
 # tokenizer.json via --tokenizer.
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$env:QAIHA_APP_ROOT = $ScriptDir
 
 . ..\_shared\scripts\load_versions.ps1
 . ..\_shared\scripts\winget_utils.ps1

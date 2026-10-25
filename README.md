@@ -53,7 +53,6 @@ __NOTE: Some of these apps will run without NPU acceleration on non-Snapdragon®
 
 | Task | Language | Inference API | Special Tags |
 | -- | -- | -- | -- |
-| [ChatApp](apps/chatapp_android) | Java/C++ | Genie SDK | LLM, GenAI |
 | [Image Classification](apps/image_classification_android) | Java | TensorFlow Lite |
 | [Object Detection](apps/object_detection_android) | Java | TensorFlow Lite | OpenCV, Live Camera Feed |
 | [Semantic Segmentation](apps/semantic_segmentation_android) |  Java | TensorFlow Lite | OpenCV, Live Camera Feed |
@@ -67,7 +66,6 @@ __NOTE: Some of these apps will run without NPU acceleration on non-Snapdragon®
 
 | Task | Language | Inference API | Special Tags |
 | -- | -- | -- | -- |
-| [ChatApp](apps/chatapp_windows_cpp) | C++ | Genie SDK | LLM, GenAI |
 | [Image Classification](apps/image_classification_windows_cpp) | C++ | ONNX | OpenCV |
 | [Object Detection](apps/object_detection_windows_cpp) | C++ | ONNX | OpenCV |
 | [Super Resolution](apps/super_resolution_windows_cpp) | C++ | ONNX | OpenCV |
@@ -85,6 +83,12 @@ __NOTE: Some of these apps will run without NPU acceleration on non-Snapdragon®
 | [Hand Gesture Recognition](apps/mediapipe_hand_gesture_ubuntu_py) | Python | TensorFlow Lite | GStreamer |
 | [Posenet Pose Estimation](apps/posenet_ubuntu_py) | Python | TensorFlow Lite | GStreamer |
 | [YamNet Audio Classification](apps/yamnet_ubuntu_py) | Python | TensorFlow Lite |
+| [Portrait Segmentation](apps/portrait_segmentation_ubuntu_py) | Python | TensorFlow Lite |
+| [Face Recognition](apps/face_recognition_ubuntu_py) | Python | TensorFlow Lite | GStreamer |
+| [3D Object Detection](apps/object_detection_3d_ubuntu_py) | Python | TensorFlow Lite | GStreamer |
+| [Semantic Segmentation](apps/semantic_segmentation_ubuntu_py) | Python | TensorFlow Lite | GStreamer |
+| [LiDAR Semantic Segmentation](apps/lidar_segmentation_ubuntu_py) | Python | TensorFlow Lite | |
+| [EasyOCR Text Recognition](apps/easyocr_ubuntu_py) | Python | TensorFlow Lite | GStreamer |
 <!-- /UBUNTU_APPS -->
 
 _\* Source available on GitHub; not included in the CLI release._
@@ -94,8 +98,8 @@ _\* Source available on GitHub; not included in the CLI release._
 
 | Tutorial | Topic |
 | --- | --- |
-| [LLM on-device deployment](https://github.com/qualcomm/ai-hub-apps/tree/main/tutorials/llm_on_genie) | Exporting and deploying Large Language Model (LLM) using Genie SDK |
-| [LLM on-device deployment with GenieX](https://github.com/qualcomm/ai-hub-apps/tree/main/tutorials/geniex) | Running and exporting Large Language Models (LLMs) with the GenieX runtime |
+| [LLM on-device deployment](tutorials/llm_on_genie) | Exporting and deploying Large Language Model (LLM) using Genie SDK |
+| [LLM on-device deployment with GenieX](tutorials/geniex) | Running and exporting Large Language Models (LLMs) with the GenieX runtime |
 <!-- /TUTORIALS -->
 
 ## LICENSE

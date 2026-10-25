@@ -19,6 +19,36 @@ def test_list_output(monkeypatch, two_app_registry, capsys, snapshot):
     snapshot("list.txt", capsys.readouterr().out)
 
 
+def test_list_filtered_output(monkeypatch, two_app_registry, capsys, snapshot):
+    run_cli(
+        ["list", "--domain", "Audio", "--registry", str(two_app_registry)], monkeypatch
+    )
+    snapshot("list_filtered.txt", capsys.readouterr().out)
+
+
+def test_list_filter_columns_output(monkeypatch, two_app_registry, capsys, snapshot):
+    run_cli(
+        [
+            "list",
+            "--type",
+            "windows",
+            "--model",
+            "whisper",
+            "--registry",
+            str(two_app_registry),
+        ],
+        monkeypatch,
+    )
+    snapshot("list_filter_columns.txt", capsys.readouterr().out)
+
+
+def test_list_no_match_output(monkeypatch, two_app_registry, capsys, snapshot):
+    run_cli(
+        ["list", "--domain", "Nope", "--registry", str(two_app_registry)], monkeypatch
+    )
+    snapshot("list_no_match.txt", capsys.readouterr().out)
+
+
 def test_info_output(monkeypatch, two_app_registry, capsys, snapshot):
     run_cli(
         ["info", "whisper_windows_py", "--registry", str(two_app_registry)], monkeypatch
@@ -162,7 +192,7 @@ def test_fetch_dev_output(monkeypatch, two_app_registry, tmp_path, snapshot):
     monkeypatch.setattr("qai_hub_apps.registry.base._is_dev", lambda: True)
     monkeypatch.setattr("qai_hub_apps.registry.base.is_app_supported", lambda _: True)
 
-    # only mock bundler from qai_hub_apps_test
+    # only mock bundler from qai_hub_apps._internal
     monkeypatch.setattr("qai_hub_apps.registry.base._bundle_app", fake_bundle_app)
 
     run_cli(

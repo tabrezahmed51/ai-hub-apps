@@ -5,6 +5,7 @@
 # ---------------------------------------------------------------------
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export QAIHA_APP_ROOT="$SCRIPT_DIR"
 
 source ../_shared/scripts/python_utils.sh
 source ../_shared/scripts/apt_utils.sh
@@ -18,6 +19,7 @@ $SUDO apt-add-repository -y ppa:ubuntu-qcom-iot/qcom-ppa
 $SUDO apt-get update -q
 
 install_apt_pkgs \
+    qcom-fastrpc-dev \
     libcairo2-dev \
     pkg-config \
     libgirepository1.0-dev \
@@ -29,8 +31,9 @@ install_apt_pkgs \
     gstreamer1.0-plugins-qcom-vtransform \
     v4l2loopback-dkms \
     v4l2loopback-utils \
+    v4l-utils \
     gstreamer1.0-libav
 
 install_apt_pkg unzip
 
-install_pip_deps --venv "$SCRIPT_DIR/.venv" -r "$SCRIPT_DIR/requirements.txt"
+install_pip_deps -r "$SCRIPT_DIR/requirements.txt"

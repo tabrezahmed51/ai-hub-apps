@@ -13,13 +13,13 @@ from typing import Any
 import cv2
 import gi
 import numpy as np
-import qai_hub_apps_utils.webui as ui
 import utils.constants as C
 from ai_edge_litert.interpreter import Delegate, Interpreter
 from qai_hub_apps_utils.bbox_processing import (
     batched_nms,
     compute_box_affine_crop_resize_matrix,
 )
+from qai_hub_apps_utils.config import AppInfo
 from qai_hub_apps_utils.fps import FpsCounter
 from qai_hub_apps_utils.image_processing import (
     apply_affine_to_coordinates,
@@ -27,7 +27,10 @@ from qai_hub_apps_utils.image_processing import (
     denormalize_coordinates,
     resize_pad,
 )
+from qai_hub_apps_utils.input_devices import get_default_video_device
+from qai_hub_apps_utils.platform import get_current_device
 from qai_hub_apps_utils.quantization import dequantize, quantize
+from qai_hub_apps_utils.webui import WebUI
 from utils.draw import draw_predictions
 from utils.input_processing import get_gstreamer_input_pipeline
 from utils.model_io_processing import compute_object_roi, preprocess_hand_x64
@@ -373,12 +376,26 @@ def main(args: argparse.Namespace) -> None:
         subprocess.call(["v4l2-ctl", "--list-devices"])
         return
 
+    if not args.hexagon_version:
+        raise SystemExit(
+            "Unknown Hexagon version for this device. "
+            "Pass it with --hexagon-version <e.g. v73>."
+        )
+
     Gst.init(None)
 
     if args.video_gstreamer_source:
         video_source = args.video_gstreamer_source
     else:
-        video_source = f"v4l2src name=camsrc device={args.video_device}"
+        try:
+            device = args.video_device or get_default_video_device()
+        except RuntimeError as error:
+            raise SystemExit(
+                f"{error} Pass a camera with --video-device <path> (see "
+                "--list-devices), or a full GStreamer source with "
+                "--video-gstreamer-source."
+            ) from error
+        video_source = f"v4l2src name=camsrc device={device}"
     pipeline = Gst.parse_launch(
         get_gstreamer_input_pipeline(
             video_source, (args.video_source_width, args.video_source_height)
@@ -386,7 +403,7 @@ def main(args: argparse.Namespace) -> None:
     )
     appsink = pipeline.get_by_name("appsink")
     if not appsink:
-        raise RuntimeError("Could not find appsink element named 'sink'")
+        raise RuntimeError("Could not find appsink element named 'appsink'")
 
     appsink.set_property("emit-signals", True)
     appsink.connect("new-sample", on_new_sample)
@@ -415,7 +432,9 @@ def main(args: argparse.Namespace) -> None:
         "models/hand_landmark_detector.tflite", experimental_delegates=[delegate]
     )
 
-    gesture_classifier = Interpreter("models/canned_gesture_classifier.tflite")
+    gesture_classifier = Interpreter(
+        "models/canned_gesture_classifier.tflite", experimental_delegates=[delegate]
+    )
 
     hand_detector.allocate_tensors()
     landmark_detector.allocate_tensors()
@@ -442,7 +461,26 @@ def main(args: argparse.Namespace) -> None:
         "--------------------------- Web server ----------------------------",
         flush=True,
     )
+    info = AppInfo.load()
+    model_section = {
+        "title": "Model",
+        "rows": [
+            ("Model", info.name),
+            ("Use case", info.use_case),
+            ("Precision", ", ".join(info.precisions)),
+            (
+                "Components",
+                [
+                    ("Palm detector", "TFLITE (NPU)"),
+                    ("Landmark detector", "TFLITE (NPU)"),
+                    ("Gesture classifier", "TFLITE (NPU)"),
+                ],
+            ),
+        ],
+    }
     try:
+        ui = WebUI()
+        ui.set_title(info.name)
         ui.start_thread()
         while True:
             rgb_frame = outq.get(timeout=5)
@@ -470,7 +508,30 @@ def main(args: argparse.Namespace) -> None:
 
             fps_counter.tick()
 
+            # run_inference batches its results; this loop feeds a single frame.
+            hand_sides = [
+                "right" if right else "left"
+                for right in (is_right[0] if is_right else [])
+            ]
+            hand_gestures = gestures[0] if gestures else []
             ui.set_frame(rgb_frame[..., ::-1])
+            ui.set_sections(
+                [
+                    model_section,
+                    {
+                        "title": "Detections",
+                        "rows": [
+                            ("FPS", f"{fps_counter.fps():.1f}"),
+                            ("Hands", str(len(hand_sides))),
+                            (
+                                "Handedness",
+                                ", ".join(hand_sides) or "-",
+                            ),
+                            ("Gestures", ", ".join(hand_gestures) or "-"),
+                        ],
+                    },
+                ]
+            )
 
     except queue.Empty:
         print("Timed out waiting for input! Exiting...")
@@ -480,7 +541,7 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hand Gesture Recognition")
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--list-devices", action="store_true", help="List options for --video-device"
     )
@@ -514,11 +575,13 @@ if __name__ == "__main__":
         required=True,
         help="Path to QAIRT SDK root",
     )
+    device = get_current_device()
     parser.add_argument(
         "--hexagon-version",
         type=str,
-        default="v73",
-        help="Hexagon version of the device, e.g. v73, default v73",
+        default=device.htp_version if device and device.htp_version else None,
+        help="Hexagon version of the device, e.g. v73. Defaults to the "
+        "configured target device.",
     )
 
     args = parser.parse_args()

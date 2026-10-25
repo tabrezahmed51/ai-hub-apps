@@ -5,7 +5,9 @@
 # ---------------------------------------------------------------------
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export QAIHA_APP_ROOT="$SCRIPT_DIR"
 
+source ../_shared/scripts/pip_utils.sh
 source ../_shared/scripts/qairt_utils.sh
 
 TEST_ASSET_BASE="https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-apps/apps/yamnet_ubuntu_py/test"
@@ -18,11 +20,7 @@ TESTS=(
     "tune.wav|Music"
 )
 
-if [ ! -f "$SCRIPT_DIR/.venv/bin/activate" ]; then
-    echo "error: virtual environment not found. Run install_runtime.sh first." >&2
-    exit 1
-fi
-source "$SCRIPT_DIR/.venv/bin/activate"
+activate_venv
 
 failures=0
 for test in "${TESTS[@]}"; do
@@ -33,7 +31,8 @@ for test in "${TESTS[@]}"; do
     wget -q -O "$wav_path" "$TEST_ASSET_BASE/$wav_name"
 
     echo "=== $wav_name (expecting '$expected') ==="
-    output="$(python main.py --audio-file "$wav_path" --qairt-path "$QAIRT_PATH")"
+    output="$(python main.py --audio-file "$wav_path" \
+        --qairt-path "$QAIRT_PATH" "$@")"
     echo "$output"
 
     if echo "$output" | grep -qi -- "$expected"; then

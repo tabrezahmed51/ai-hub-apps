@@ -5,18 +5,21 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
 
 from qai_hub_apps import _is_dev
 from qai_hub_apps.commands.fetch import run_fetch
-from qai_hub_apps.configs.app_yaml import AppType
+from qai_hub_apps.configs.app_yaml import INFO_FILENAME, AppType
 from qai_hub_apps.configs.model_asset import ModelAsset
 from qai_hub_apps.errors import InvalidArgumentError, QAIHubAppsError
 from qai_hub_apps.experimental.validate import ensure_build_supported
 from qai_hub_apps.registry import App, Registry
+from qai_hub_apps.utils.scripts import script_env
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +29,7 @@ def _resolve_app_from_dir(app_dir: Path, registry: Registry) -> App:
 
     The app id is read from the ``id`` field of the bundled ``info.yaml``.
     """
-    info_path = app_dir / "info.yaml"
+    info_path = app_dir / INFO_FILENAME
     logger.debug("Resolving app id from %s", info_path)
     try:
         with open(info_path, encoding="utf-8") as f:
@@ -47,8 +50,8 @@ def _prepare_app(
     registry: Registry,
     model_asset: ModelAsset | None,
     overwrite: bool = False,
-) -> tuple[App, Path]:
-    """Return the ``(App, app_dir)`` to build, fetching it if needed."""
+) -> tuple[App, Path, bool]:
+    """Return the ``(App, app_dir, did_fetch)`` to build, fetching it if needed."""
     assert app_id is None or app_path is None
     logger.debug(
         "prepare_app: app_id=%s, app_path=%s, output_dir=%s, overwrite=%s",
@@ -58,13 +61,13 @@ def _prepare_app(
         overwrite,
     )
     if app_path is not None:
-        if model_asset is not None:
-            logger.warning(
-                "Model options are ignored when building from a path (no fetch)."
-            )
         app_dir = app_path.resolve()
         logger.debug("Building in place from path %s", app_dir)
-        return _resolve_app_from_dir(app_dir, registry), app_dir
+        app = _resolve_app_from_dir(app_dir, registry)
+        did_fetch = False
+        if model_asset is not None:
+            did_fetch = app.switch_model(app_dir, model_asset)
+        return app, app_dir, did_fetch
 
     assert app_id is not None
     app = registry.find_by_id(app_id)
@@ -75,28 +78,29 @@ def _prepare_app(
             "Found app at %s, reusing as-is (use --overwrite to re-fetch).",
             candidate.as_posix(),
         )
+        did_fetch = False
         if model_asset is not None:
-            logger.warning(
-                "Model options are ignored when reusing an existing app "
-                "directory (no fetch)."
-            )
-        return app, candidate
+            did_fetch = app.switch_model(candidate, model_asset)
+        return app, candidate, did_fetch
 
     if model_asset is None and not app.disable_cli_model_fetch:
         raise InvalidArgumentError(
             f"Building '{app.id}' requires fetching it, but no model was "
             "provided. Pass --model / --model-id / --model-path, or build an "
-            "already-fetched app with --app-path."
+            "already-fetched app with --app-path.\n"
+            f"See the models this app supports:\n  qai-hub-apps info {app.id}"
         )
     logger.debug("Fetching '%s' into %s (overwrite=%s)", app.id, output_dir, overwrite)
     app_dir = run_fetch(app.id, output_dir, registry, model_asset, overwrite=overwrite)
-    return app, app_dir
+    return app, app_dir, True
 
 
 def _build_command(app: App, app_dir: Path, use_docker: bool, clean: bool) -> list[str]:
     """Return the command that runs the app's generated build script."""
-    # Windows apps ship a PowerShell build.ps1; everything else a bash build.sh.
-    if app.app_type == AppType.WINDOWS:
+    # Windows apps only ship build.ps1; Android apps ship both;
+    if app.app_type == AppType.WINDOWS or (
+        app.app_type == AppType.ANDROID and sys.platform == "win32"
+    ):
         script = app_dir / "build.ps1"
         command = ["powershell", "-File", str(script)]
         no_docker_flag, clean_flag = "-NoDocker", "-Clean"
@@ -108,7 +112,7 @@ def _build_command(app: App, app_dir: Path, use_docker: bool, clean: bool) -> li
     if not script.is_file():
         fix = (
             "Regenerate it with "
-            "'python -m qai_hub_apps_test.scripts.generate_build_scripts'."
+            "'python -m qai_hub_apps._internal.scripts.generate_app_scripts'."
             if _is_dev()
             else "The app bundle is incomplete; re-fetch it with --overwrite "
             "or pass an updated --app-path, then retry."
@@ -131,7 +135,7 @@ def run_build(
     use_docker: bool = True,
     clean: bool = False,
     overwrite: bool = False,
-) -> None:
+) -> Path:
     """Resolve the build target, fetch it if needed, and run its build script."""
     logger.debug(
         "run_build: app_id=%s, app_path=%s, use_docker=%s, clean=%s",
@@ -140,19 +144,25 @@ def run_build(
         use_docker,
         clean,
     )
-    app, app_dir = _prepare_app(
+    app, app_dir, did_fetch = _prepare_app(
         app_id, app_path, output_dir, registry, model_asset, overwrite=overwrite
     )
     ensure_build_supported(app, use_docker)
 
-    command = _build_command(app, app_dir, use_docker, clean)
+    command = _build_command(app, app_dir, use_docker, clean or did_fetch)
     logger.info("Building '%s' (%s)...", app.id, "docker" if use_docker else "native")
     logger.debug("Running %s (cwd=%s)", command, app_dir)
     try:
-        subprocess.run(command, cwd=app_dir, check=True)
+        subprocess.run(
+            command,
+            cwd=app_dir,
+            check=True,
+            env={**os.environ, **script_env()},
+        )
     except subprocess.CalledProcessError as e:
         raise QAIHubAppsError(
             f"Build failed for '{app.id}' (exit code {e.returncode})."
         ) from e
     logger.debug("Build subprocess for '%s' exited 0", app.id)
     logger.info("Build complete for '%s'.", app.id)
+    return app_dir
